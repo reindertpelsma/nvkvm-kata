@@ -30,7 +30,9 @@ reaches `setuid(0)` from a QEMU RCE lands on namespace-uid 0, which is an
 *unprivileged host uid* that owns nothing. Measured end to end
 ([§4.3](#43-option-2--a-wrapper-binary-at-hypervisorqemupath--recommended)).
 
-**The single biggest risk** is not the confinement mechanism, it is whether
+**The single biggest risk** (SUPERSEDED 2026-08-27 — see the Stage 1 note in §5;
+the capability half is measured and the uid half is documented) was thought to be
+not the confinement mechanism, but whether
 nvkvm's GPU path still works when QEMU is no longer host-root: the NVIDIA
 driver's own privilege checks, `RLIMIT_MEMLOCK` on pinned host memory, and the
 handful of absolute host paths Kata hands QEMU by *name* rather than by *fd*.
@@ -799,6 +801,45 @@ value on an nvkvm-patched QEMU, and `tests/perf/` shows the cost is acceptable.
 *If it fails:* fall back to `seccompsandbox = "on"`, then to `""`, and record
 which sub-option broke it — that is a publishable result either way.
 
+> **LARGELY ANSWERED — 2026-08-27, before this stage was ever run.** Two pieces
+> of pre-existing evidence retire most of what Stage 1 was for.
+>
+> **The capability/rlimit unknown is settled, measured on the physical PC.** The
+> deployed `nvkvm-steamos` VMM runs QEMU with `cap_drop: ALL` plus only
+> `SETUID, SETGID, SETPCAP, SYS_CHROOT`. Read from the live process:
+>
+> ```
+> CapPrm/CapEff/CapBnd:  0x00000000000401c0
+>                        = cap_setgid,cap_setuid,cap_setpcap,cap_sys_chroot
+> Max locked memory:     8388608 bytes        (the DEFAULT, not raised)
+> ```
+>
+> `CAP_IPC_LOCK` is absent from the permitted, effective **and** bounding sets,
+> and `RLIMIT_MEMLOCK` is the stock 8 MiB — yet dma-buf pinning, presentation
+> and CUDA all work. So the NVIDIA driver's pinning path does **not** gate on
+> `CAP_IPC_LOCK` and does not need a raised memlock. The specific fear below —
+> that the out-of-tree driver calls `capable()`, which a *namespaced*
+> `CAP_IPC_LOCK` would not satisfy — does not arise, because the capability is
+> never requested.
+>
+> Note the process is uid 0 with capabilities dropped, so this settles the
+> capability question, not the uid question.
+>
+> **The uid question is answered by nvkvm-pv's own documentation.** `docs/faq.md`
+> states that rootless Docker "works on the same terms, as long as your user can
+> open `/dev/kvm`". Rootless Docker maps container-root to a non-zero host uid
+> through subuid ranges — structurally the same mechanism this document proposes
+> for the wrapper. If nvkvm runs there, the wrapper's premise holds.
+>
+> **What actually remains is plumbing, not an unknown that can kill the design:**
+> device-node access for the mapped uid (`/dev/nvidia*`, `/dev/kvm`,
+> `/dev/udmabuf`). nvkvm-pv's FAQ names exactly this constraint, and it is the
+> same problem the device-cgroup and CDI work in this repo already addresses.
+>
+> Stage 1 is therefore **downgraded from gating to confirmatory**. Run it to
+> verify the device-node plumbing under a real mapped uid, not to find out
+> whether the driver tolerates being unprivileged — it demonstrably does.
+
 ### Stage 1 — prove nvkvm works at all as a non-host-root process
 
 Before writing the wrapper, settle the question that decides whether it is
@@ -960,7 +1001,9 @@ Stage 1 exists to settle it. The specific unknowns:
 
 **Experiments this document creates:**
 
-1. **Stage 1** — does nvkvm work as a non-root uid at all? (§5) — the gating one.
+1. **Stage 1** — device-node plumbing under a mapped uid (§5). No longer gating:
+   the driver is measured not to need `CAP_IPC_LOCK` or a raised `RLIMIT_MEMLOCK`,
+   and rootless Docker is documented to work.
 2. Re-run the §3.2 probe matrix on Debian 12, RHEL 9 and a stock Ubuntu 22.04
    GPU node. Quantifies the userns-availability claim properly.
 3. Run `nvkvm-pv/tests/validate.sh` under all five `-sandbox` values against an
