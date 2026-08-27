@@ -22,9 +22,12 @@ using the card. Guest userspace is stock NVIDIA. Measured at roughly host parity
 for CUDA, PyTorch, LLM inference and Vulkan compute. **`nvkvm-kata` is the
 proposal to run that stack inside [Kata Containers](https://katacontainers.io),
 so that an OCI/Kubernetes workload gets a GPU behind a real VM boundary with no
-passthrough, no vGPU licence, and no loss of the GPU to the host** — and so that
-the VMM is confined by the container platform's own machinery (cgroups,
-namespaces, the shim's sandbox) rather than by nvkvm's own tooling.
+passthrough, no vGPU licence, and no loss of the GPU to the host.**
+
+The original pitch added "…and so that the VMM is confined by the container
+platform's own machinery rather than by nvkvm's own tooling". **Measurement
+removed most of that clause** — Kata jails Firecracker but not QEMU, and nvkvm
+is QEMU-only. What survives, and is a better reason, is below.
 
 Scope is deliberately narrow: **compute and headless graphics only.** No display
 path, no display broker, no audio, no clipboard, no input.
@@ -37,9 +40,23 @@ part. **That was wrong, and the inversion is the main result.**
 | piece | status |
 |---|---|
 | VMM opening the **host** GPU device nodes | **MEASURED, and it works today by accident.** Kata builds the sandbox device cgroup itself as an allowlist that excludes `/dev/nvidia*` — and then, on cgroup v2, never installs it, so the VMM opens every NVIDIA node read-write with no configuration. Confirmed on a real RTX 3060. Treat as temporary — [01](docs/design/01-vmm-confinement.md) |
+| confinement of the **VMM process itself** | **MEASURED, and it is the weak point.** Kata jails Firecracker and enables Cloud Hypervisor's seccomp by default; its QEMU driver gets neither, and ships with `seccompsandbox = ""`. Since nvkvm is QEMU-only, this project is pinned to the least-confined VMM — [01 §3](docs/design/01-vmm-confinement.md), [05 §2a](docs/design/05-caveats-and-scope.md) |
 | host NVIDIA **libraries** into the container | works via CDI mounts → virtio-fs; CDI **hooks** are dropped by Kata's shim — [02](docs/design/02-libraries-via-cdi.md) |
 | **guest-resident device nodes** into the container | expected to be novel; **it is not.** kata-agent already applies CDI specs found inside the guest — [03](docs/design/03-guest-side-devices.md) |
 | shipping an out-of-tree module in Kata's guest kernel | strong precedent (`build-kernel.sh -g nvidia` already builds one) — [04](docs/design/04-guest-kernel.md) |
+
+And one thing the research turned around completely: the project was pitched
+partly on **"the VMM gets confined by the platform"**. It largely does not — for
+the QEMU path Kata contributes a network namespace and a cgroup hierarchy, no
+seccomp, no chroot, no uid drop, and (on cgroup v2) no device policy either.
+Since most QEMU exploits give code execution in the VMM's *host userspace*, that
+is the difference between "a VM boundary" and "a full host compromise". The
+honest version is the reverse of the original claim: **nvkvm's architecture
+already assumes an untrusted VMM — unprivileged per-guest-process isolates, and
+a display broker built so the VMM never holds a display-server connection — so
+on that axis nvkvm is ahead of Kata's QEMU path and is positioned to contribute
+to it rather than consume it.** See
+[00](docs/design/00-overview.md#what-nvkvm-brings-that-katas-qemu-path-lacks).
 
 The organising rule: **libraries traverse nothing, device nodes traverse
 everything.** CUDA userspace only ever needs to exist in the container and goes

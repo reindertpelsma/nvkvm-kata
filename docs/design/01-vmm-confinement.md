@@ -688,12 +688,17 @@ question in a way it is not under Docker:
 
 ---
 
-## 3. Other confinement Kata applies to the VMM: almost none
+## 3. Other confinement Kata applies to the VMM: almost none — and that is a per-driver choice, not an oversight
 
 - **seccomp on the host QEMU: none.** The `seccompsandbox` knob (QEMU's own
-  `-sandbox`) defaults to empty/off (`DEFSECCOMPSANDBOXPARAM :=` in
-  `src/runtime/Makefile`, disabled for performance, kata issue #2266). No
-  external seccomp filter is attached to the QEMU `exec.Cmd`.
+  `-sandbox`) defaults to empty/off (`DEFSECCOMPSANDBOXPARAM :=`,
+  `src/runtime/Makefile:259`; confirmed on disk in the shipped 4.1.0 release as
+  `seccompsandbox = ""`). No external seccomp filter is attached to the QEMU
+  `exec.Cmd`. **Turn it on** — §3.3 has the measured values and the traps.
+  (An earlier draft attributed the off-by-default to performance and cited kata
+  issue #2266; that issue number is **not referenced anywhere in the tree** and
+  is **UNVERIFIED**. The config comment does say "enabling this feature may
+  reduce performance", which is the citable form.)
   **Do not confuse this with `disable_guest_seccomp`** (default `true`), which
   governs whether container seccomp profiles are applied *inside the guest* by
   kata-agent and has nothing to do with the host VMM.
@@ -717,6 +722,199 @@ question in a way it is not under Docker:
   **This matters:** if `container_kvm_t` *is* enforcing, it is a second,
   independent gate on opening `/dev/nvidia*` that the device cgroup work will
   not address, and it will need a policy module of its own.
+
+### 3.1 Kata confines Firecracker. Kata does not confine QEMU.
+
+The bullets above read as a list of small omissions. They are not: they are a
+**per-hypervisor-driver policy difference**, and the QEMU driver is the one on
+the wrong side of it.
+
+Grepping the three drivers for `jailer|seccomp|chroot`
+(`kata-containers` @ `f62ecce`):
+
+| driver | matches | what is actually there |
+|---|---|---|
+| `src/runtime/virtcontainers/fc.go` | **46** | the full Firecracker **jailer**: `chrootBaseDir` (`:151`, set to `/run/<storage-suffix>` at `:240`), `jailerRoot` (`:152`, `:243`), a `jailed` flag (`:164`), and an exec of `fc.config.JailerPath` with `--chroot-base-dir`, `--id`, `--exec-file`, `--daemonize` and `--netns` (`:379-394`) |
+| `src/runtime/virtcontainers/clh.go` | 3 | Cloud Hypervisor's **own** `--seccomp` support, **on by default** and only turned off if `DisableSeccomp` is set (`:1860-1863`) |
+| `src/runtime/virtcontainers/qemu.go` | **3** | nothing but plumbing for QEMU's own `-sandbox`: `SeccompSandbox: q.config.SeccompSandbox` (`:1285`), `if q.config.SeccompSandbox != ""` (`:1349`), and a `bpf_jit_enable` performance warning (`:1362`) |
+
+So for the QEMU path there is **no jailer, no chroot, no external seccomp
+filter, and no namespace beyond the pod netns** (§2). Its only mitigation is
+QEMU's internal seccomp — and that is **off by default**
+(`DEFSECCOMPSANDBOXPARAM :=`, `src/runtime/Makefile:259`).
+
+**MEASURED on the shipped 4.1.0 release**, which is the cleanest statement of
+the difference:
+
+```
+$ grep jailer_path      /opt/kata/share/defaults/kata-containers/configuration-fc.toml
+jailer_path = "/opt/kata/bin/jailer"
+$ grep ^seccompsandbox  /opt/kata/share/defaults/kata-containers/configuration-qemu.toml
+seccompsandbox = ""
+```
+
+Firecracker ships jailed. QEMU ships with every mitigation off.
+
+Two honest qualifications, because the asymmetry is real but not total:
+
+- **The jailer does not drop uid either.** `fc.go:382-383` passes `--uid 0
+  --gid 0`, citing kata-containers/runtime#1869. So Firecracker gets chroot,
+  namespaces, cgroups and Firecracker's own seccomp — but still runs as root.
+  "Kata drops privileges for Firecracker" would be wrong.
+- **QEMU is not entirely without a uid-drop path.** `qemu.go` does plumb
+  `Uid`/`Gid`/`Groups` into the launch config (`:1277-1279`) — but that is the
+  `rootless` VMM feature, which defaults to `false`, is a `setuid`/`setgid`
+  rather than a user namespace, and is documented incompatible with VFIO (§2).
+  It is not applied on the default path.
+
+### 3.2 Why this is the risk that actually matters here
+
+**Most QEMU exploits give code execution in the VMM's host userspace, not in
+the KVM kernel module.** Device-model bugs — a heap overflow in a virtio
+backend, a UAF in a device's reset path — land the attacker inside the
+`qemu-system-x86_64` process. "There is a VM boundary" is worth little at that
+point, because the boundary is the process that was just compromised. What
+matters next is what that process can still reach.
+
+Combining §1.4/§1.6 with §2 and §3, on a cgroup v2 host today, a QEMU RCE under
+Kata yields, all measured:
+
+| | |
+|---|---|
+| uid | **0** (`/proc/<qemu-pid>/status` `Uid: 0`) |
+| seccomp | **none** — `seccompsandbox = ""`, and no external filter |
+| AppArmor / SELinux | **none** (`attr/current` = `unconfined` on both hosts tested) |
+| device cgroup | **none attached**, `effective=0` to the root (§1.4.4) — so every host device node opens, `/dev/mem` included |
+| chroot / jail | **none** for the QEMU driver |
+| PID namespace | **the host's** (§2) |
+| mount namespace | the **containerd shim's**, not PID 1's — a copy of the host tree with no `pivot_root` (§2) |
+| network namespace | the pod's — the one thing that *is* confined |
+
+That is not "a contained blast radius". **That is root on the host**, with the
+network namespace as the only meaningful restriction, and a `/dev/mem` handle
+available to remove even that. It should be written down as a full host
+compromise rather than softened.
+
+Note also what upstream's own comparison says. `docs/design/virtualization.md`
+rates **Security Isolation**: QEMU "Good"; Cloud Hypervisor "Excellent
+(seccomp)"; Firecracker "Excellent"; Dragonball "Excellent" (`:238`) — and its
+decision matrix lists "Maximum security isolation → Cloud Hypervisor (seccomp),
+Firecracker, Dragonball" (`:255`), **omitting QEMU**. Upstream's strategy for
+VMM attack surface is visible in that table and in the three alternatives it
+offers, all of them Rust (`:104-106`; Firecracker described as "a minimalist
+VMM built on rust-vmm crates", `:204`): **make the VMM small, do not confine the
+big one.** That is a coherent strategy. It is also one nvkvm cannot follow —
+see [05 §2](05-caveats-and-scope.md).
+
+### 3.3 The one lever that exists today: `seccompsandbox` — **MEASURED**
+
+There is exactly one confinement knob upstream already built for the QEMU path,
+it needs no patch, and this design should recommend setting it.
+
+**The key.** `seccompsandbox`, a string, in the hypervisor section of
+`configuration.toml` — `SeccompSandbox string \`toml:"seccompsandbox"\`` at
+`src/runtime/pkg/katautils/config.go:107`, carried to
+`HypervisorConfig.SeccompSandbox` (`:1112`, declared
+`virtcontainers/hypervisor.go:614-615`), read by `qemu.go:1285`, and appended
+**verbatim** as QEMU's `-sandbox <value>` by govmm
+(`src/runtime/pkg/govmm/qemu/qemu.go:3121-3125`).
+
+**The default is off**, in the template (`configuration-qemu.toml.in:75`,
+`seccompsandbox = "@DEFSECCOMPSANDBOXPARAM@"`), in the Makefile
+(`:259`, `DEFSECCOMPSANDBOXPARAM :=`) and on disk in the shipped 4.1.0 release
+(`seccompsandbox = ""`).
+
+**The value.** The shipped config's own comment
+(`configuration-qemu.toml.in:71-74`) says:
+
+> Recommended value when enabling:
+> `"on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny"`
+
+Measured, on the 4.1.0 QEMU, driving real Kata sandboxes and reading
+`/proc/<qemu-pid>/cmdline` back:
+
+| value | result |
+|---|---|
+| `""` (default) | boots; **no `-sandbox` on the QEMU command line at all** |
+| `"on"` | boots; `-sandbox on` |
+| `"on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny"` | boots; passed through verbatim |
+| `"on,obsolete=deny,resourcecontrol=deny"` | boots; passed through verbatim |
+| `"on,obsolete=deny,elevateprivileges=children,resourcecontrol=deny"` | **QEMU exits 1**: `failed to set no_new_privs aborting` |
+| `"enable=1"` | **QEMU rejects it**: `Parameter 'enable' expects 'on' or 'off'` |
+
+Two traps in that table:
+
+- **`"enable=1"` does not work.** It appears in
+  `virtcontainers/qemu_test.go:121` as a Go-side unit-test fixture and is easy
+  to copy out of the tree, but QEMU's `-sandbox` implied option is `enable`
+  taking `on`/`off`, and `1` is rejected at parse. Use `on`.
+- **A bad value fails badly.** QEMU exits immediately, but the shim does not
+  surface it: `ctr run` blocked until its timeout, and containerd then logged
+  `failed to delete task: context deadline exceeded` and `failed to delete dead
+  shim`. Validate the string on one sandbox before rolling it out.
+
+**What it does not cover.** `-sandbox` is a seccomp filter on the QEMU process
+and nothing else. It does **not** give a chroot, a mount namespace, a uid drop,
+or a device cgroup, and it does not narrow what an attacker who already has code
+execution can reach through file descriptors QEMU legitimately holds — which,
+under nvkvm, includes `/dev/nvidia-uvm` (`nvkvm-pv/docs/internal/isolate-model.md`,
+"Who opens what"). It reduces syscall surface; it does not confine.
+
+**The conflict with nvkvm, which is why the recommendation is qualified.**
+QEMU's own help text for the sub-options (`qemu-system-x86_64 --help`, verified
+against the 4.1.0 build) reads:
+
+> use `elevateprivileges` to allow or deny the QEMU process ability to elevate
+> privileges using `set*uid|gid` system calls. The value `children` will deny
+> `set*uid|gid` system calls for main QEMU process but will allow forks and
+> execves to run unprivileged
+>
+> use `spawn` to avoid QEMU to spawn new threads or processes by blocking
+> `*fork` and `execve`
+
+nvkvm **spawns one isolate process per guest process** and drops privileges in
+it (`nvkvm-pv/docs/internal/isolate-model.md`, "Isolation modes"). So Kata's
+recommended string is the wrong one for us on two counts: `spawn=deny` blocks
+the `fork`/`execve` the isolate spawn path is built on, and
+`elevateprivileges=deny` blocks the `set*uid|gid` the `uid` and `uid+chroot`
+rungs need. The obvious repair — `elevateprivileges=children`, which exists
+precisely for "deny for the parent, allow unprivileged children" — **does not
+work on Kata's QEMU build**, as measured above.
+
+**Recommendation, with its uncertainty stated:**
+
+```toml
+# in the [hypervisor.qemu] section of configuration.toml
+seccompsandbox = "on,obsolete=deny,resourcecontrol=deny"
+```
+
+— seccomp on, obsolete syscalls denied, affinity and scheduler-priority
+manipulation denied, while leaving `fork`/`execve` and `set*uid|gid` available
+to the isolate path. It is measurably weaker than Kata's recommended string and
+measurably stronger than the default of nothing.
+
+**UNVERIFIED — and this is Phase 1 work, not a claim:** none of the five values
+above was tested against an **nvkvm-patched** QEMU. Whether `spawn=deny` really
+breaks isolate spawn, whether `elevateprivileges=deny` really breaks the `uid`
+rung, and whether the recommended string above leaves nvkvm fully functional,
+all have to be measured once such a build exists. The reasoning is from QEMU's
+documented semantics and nvkvm's documented isolate model, not from a run.
+**Settle it by running `tests/validate.sh` under each of the five values.**
+Also unmeasured here: the **performance cost**. Kata's config comment says
+"enabling this feature may reduce performance" and recommends
+`/proc/sys/net/core/bpf_jit_enable=1` to reduce it, and `qemu.go:1349-1367`
+warns at runtime when that sysctl is 0 — but no number is given anywhere, and
+nvkvm's ioctl-forwarding path is syscall-heavy in a way a general container
+workload is not, so the cost may be atypical. Measure it alongside
+`tests/perf/`.
+
+### 3.4 The larger option: give the QEMU driver what `fc.go` already has
+
+Setting `seccompsandbox` is the thing to do this week. It is not a confinement
+story. The confinement story for the QEMU path does not exist upstream, and
+[00](00-overview.md) argues that **nvkvm is unusually well placed to contribute
+it** — its architecture already assumes the VMM is untrusted. What that would
+take, and how plausible it is upstream, is discussed there.
 
 ---
 
@@ -825,7 +1023,7 @@ opening move.
 | `sandbox_cgroup_only` | `configuration-qemu.toml.in` | `false` (NVIDIA profile: `true`; runtime-rs: `true`) | **MEASURED: no effect on device access on cgroup v2** — both values put QEMU in the same sandbox cgroup (§1.4.3), and that cgroup has no device policy (§1.6). Set it `true` for the cgroup-leak reason Kata's NVIDIA profile gives |
 | `rootless` | same | `false` | **leave false.** Rootless is documented incompatible with VFIO for permission reasons and would add a DAC problem we do not currently have |
 | `disable_selinux` | same | `false` | if the host ships `container-selinux`, expect a second gate; measure before assuming |
-| `seccompsandbox` | same | off | leave off; QEMU's `-sandbox` would interfere with the isolate spawn path |
+| `seccompsandbox` | same | **off** (`""`, confirmed on disk in the 4.1.0 release) | **turn it on** — §3.3. It is the only VMM-confinement lever upstream built for the QEMU path. Use `"on,obsolete=deny,resourcecontrol=deny"`: Kata's own recommended string adds `spawn=deny` and `elevateprivileges=deny`, which are expected to break nvkvm's isolate spawn and its `uid` rung (UNVERIFIED against a patched build), and `elevateprivileges=children` is measured **broken** on Kata's QEMU |
 | `NVKVM_ISOLATE_MODE` | nvkvm (env on the VMM) | `auto` | leave on `auto`; assert on the `isolate-mode-active` QOM property |
 
 ---
