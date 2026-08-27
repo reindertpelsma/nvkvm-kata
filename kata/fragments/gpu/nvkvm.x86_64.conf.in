@@ -1,0 +1,26 @@
+# nvkvm guest-kernel config fragment.
+#
+# Drop-in for kata-containers
+# tools/packaging/kernel/configs/fragments/gpu/nvkvm.x86_64.conf.in, selected by
+# `build-kernel.sh -g nvkvm`.  Modelled on the shipped gpu/nvidia.x86_64.conf.in
+# but MUCH smaller, because nvkvm's guest module is not a GPU driver: it carries
+# no firmware loader, no MCE/memory-failure handling, no MTRR/PAT and no crypto,
+# since none of the hardware those serve is in the guest.
+#
+# The one thing it must share with the nvidia fragment is CONFIG_MODULES.  Kata's
+# stock guest kernel is monolithic -- CONFIG_MODULES is NOT in common/base.conf,
+# it is turned on by the GPU fragments alone -- so a plain Kata kernel cannot
+# load nvkvm-guest.ko at all.  See docs/design/04-guest-kernel.md.
+CONFIG_MODULES=y
+CONFIG_MODULE_UNLOAD=y
+CONFIG_LOCALVERSION="-nvkvm${CONF_GUEST_SUFFIX}"
+
+# Deliberately NOT set here: CONFIG_DRM.
+#
+# nvkvm's default build (NVKVM_GRAPHICS=1) registers a real DRM render node and
+# therefore needs the DRM core to own major 226.  The compute-only build
+# (NVKVM_GRAPHICS=0) drops nvkvm_drm.o/nvkvm_kms.o entirely and needs no DRM at
+# all.  This project's first milestone is compute (nvidia-smi + CUDA), so the
+# compute-only build is the default and this fragment stays a three-liner.
+# For the graphics build, merge kata/fragments/gpu/nvkvm-graphics.x86_64.conf
+# on top.
