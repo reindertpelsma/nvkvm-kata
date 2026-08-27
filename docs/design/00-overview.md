@@ -111,8 +111,8 @@ convenience.
 
 | question | answer | doc |
 |---|---|---|
-| What confines the VMM? | Only the network namespace, plus a cgroup whose **device policy Kata builds itself** as a targeted allowlist that does **not** include the NVIDIA nodes. Root, no seccomp, no AppArmor, SELinux only if the distro ships `container-selinux`. | [01](01-vmm-confinement.md) |
-| Can the VMM open `/dev/nvidia*`? | **Not by default.** Needs explicit grant. Best route is a host CDI spec whose `deviceNodes` land in the sandbox cgroup — no Kata patch. | [01](01-vmm-confinement.md) |
+| What confines the VMM? | The network namespace, the shim's mount namespace, and a cgroup whose **device policy Kata builds itself** as a targeted allowlist that does **not** include the NVIDIA nodes — except that **on cgroup v2 that policy is never installed** (MEASURED). Root, no seccomp, no AppArmor, SELinux only if the distro ships `container-selinux` (measured absent on Ubuntu). | [01](01-vmm-confinement.md) |
+| Can the VMM open `/dev/nvidia*`? | **MEASURED: yes, on cgroup v2, unconfigured, for both `sandbox_cgroup_only` values** — confirmed on a real RTX 3060 with driver 575.51.03, for both the Go and Rust runtimes. Not because Kata allows it: because `containerd/cgroups` `v2.ToResources()` drops the device list, so nothing is enforced (`/dev/mem` opens too). Expect this to be fixed; build route (a) — a host CDI spec whose `deviceNodes` land in the sandbox cgroup — anyway. | [01](01-vmm-confinement.md) |
 | How do host libraries reach the container? | CDI `mounts` → ordinary OCI mounts → virtio-fs. Works today. CDI **hooks are silently dropped** by Kata's Go shim (kata #11169), so `update-ldcache` must be replaced by `LD_LIBRARY_PATH` or regenerated in the guest. | [02](02-libraries-via-cdi.md) |
 | How do guest-created nodes reach the container? | kata-agent **already** applies CDI specs found in the guest's `/var/run/cdi` (`handle_cdi_devices`), and the CDI library emits the cgroup allow rule from the deviceNodes entry. This was expected to be novel; it is not. | [03](03-guest-side-devices.md) |
 | Bind or mknod in the guest? | rustjail has `bind_dev`, but only on the user-namespace path and with no `EPERM` fallback (runc has both). mknod works today; bind is better and is a ~6-line change. | [03](03-guest-side-devices.md) |
@@ -152,6 +152,16 @@ feeds `createResourceController`.
 supported configuration?** Everything else is downstream of it, and it is
 cheap to answer.
 
+**ANSWERED, 2026-08-27 — see [01 §1.4](01-vmm-confinement.md).** On cgroup v2 it
+can, unconfigured, for both `sandbox_cgroup_only` values, on both Kata runtimes,
+verified against a real GPU and driver. The device policy Kata computes is
+discarded by `containerd/cgroups` `v2.ToResources()` and never attached, so the
+sandbox cgroup restricts nothing at all (`/dev/mem` opens from it). **Phase 0 is
+therefore not blocking, and phases 1 and 2 can start now** — but the gate is
+open by accident, a counterfactual run shows Kata's intended policy would deny
+these exact nodes, and route (a) should still be built because it is the only
+answer that is correct on cgroup v1 and survives the eventual fix.
+
 ---
 
 ## Build plan, riskiest first
@@ -172,6 +182,13 @@ Nothing else is worth starting until this is known.
    changes the answer.
 3. Check `/proc/<qemu-pid>/attr/current` and `semodule -l | grep container`.
    Decide whether SELinux is a second gate.
+
+**Exit criterion — MET for cgroup v2.** `scripts/check-vmm-device-access.sh`
+is the documented, reproducible experiment, and on a cgroup v2 host the answer
+is that no configuration is needed at all. Steps 1 and (partly) 3 above are
+done; step 2 — proving the CDI route actually reaches the sandbox cgroup —
+has **not** been run and is now the remaining Phase 0 work, together with a
+cgroup v1 host. Original wording follows.
 
 **Exit criterion:** a documented, reproducible configuration in which a Kata
 QEMU process successfully `open()`s `/dev/nvidiactl`. If none exists without a

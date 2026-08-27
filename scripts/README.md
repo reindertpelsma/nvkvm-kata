@@ -27,18 +27,32 @@ sudo ./scripts/check-vmm-device-access.sh --synthesise-nodes    # Kata but no GP
 It starts a Kata sandbox with `ctr`, finds the hypervisor process, prints its
 namespaces, SELinux label and `/proc/<pid>/cgroup`, labels the cgroup as the
 **sandbox** (`kata_<id>`) or the **overhead** (`kata_overhead/<id>`) one, dumps
-that cgroup's device policy — `devices.list` walking to the root on v1,
-`bpftool cgroup show` + `bpftool prog dump xlated` walking to the root on v2 —
-and then **joins that exact cgroup with a probe process and calls `open()`**.
+that cgroup's device policy — `devices.list` walking to the root on v1; on v2 a
+direct `BPF_PROG_QUERY(BPF_CGROUP_DEVICE)` walking to the root, plus
+`bpftool prog dump xlated` for any program it finds — and then **joins that exact
+cgroup with a probe process and calls `open()`**.
 
-Three things make the output believable rather than merely plausible:
+The v2 query goes to the kernel rather than through `bpftool` because `bpftool`
+is not dependable across version skew: on Ubuntu 22.04 / kernel 6.8 / bpftool
+7.4.0 it answered `Error: can't query bpf programs attached to …: No such device
+or address` for **every** cgroup including the root, which reads exactly like
+"there is nothing here" while proving nothing. The direct query reports
+`effective` (this cgroup's programs plus every ancestor's — the set that
+actually gates `open()`) and `attached` separately; `effective=0` at the leaf is
+a complete answer.
+
+Four things make the output believable rather than merely plausible:
 
 * the probe prints its own `/proc/self/cgroup` after joining, so you can see it
   measured the cgroup the hypervisor is really in;
 * `/dev/kvm` is probed alongside. Kata's `sandboxDevices()` allows it
   unconditionally, so if it fails the run is reported **VOID**, not FAIL;
 * every device is probed a second time from the caller's own cgroup, so a
-  failure that is not Kata's is visible as such.
+  failure that is not Kata's is visible as such;
+* `--self-test` synthesises a *real* cgroup v2 device filter with
+  `systemd-run -p DevicePolicy=strict` and checks that the probe reports `EPERM`
+  and the query reports `device-RESTRICTED` — so a run that reports "nothing is
+  enforced" has already demonstrated it can tell the difference.
 
 `--synthesise-nodes` makes the experiment runnable on a **GPU-less** box. The
 device cgroup is enforced in an LSM hook keyed on `(type, major, minor)` before
@@ -46,6 +60,11 @@ the driver's `->open()`, so a `mknod`'d `c 195:255` with nothing behind it
 answers the cgroup question exactly: `EPERM` means the cgroup denied it,
 `ENXIO` means the cgroup allowed it and the kernel then found no driver. `ENXIO`
 is a **PASS**.
+
+**Result so far:** see [01 §1.4](../docs/design/01-vmm-confinement.md).
+On cgroup v2 every NVIDIA node opens read-write from inside the Kata sandbox
+cgroup, for both `sandbox_cgroup_only` values and both Kata runtimes, because
+Kata's device policy is never installed there.
 
 ## `split-cdi-spec.sh`
 
@@ -66,3 +85,10 @@ spec directory) safe to request on the workload container, and **(b)** the
 host-side CDI spec to request on the **pod sandbox** so those nodes reach Kata's
 sandbox device cgroup. Hooks are dropped with a warning by default, because
 Kata's shim drops them anyway (kata-containers#11169); `--keep-hooks` overrides.
+
+Exercised against a real spec from `nvidia-ctk cdi generate` (toolkit 1.20.0,
+driver 575.51.03, RTX 3060): 12 `deviceNodes` dropped and 9 hooks dropped —
+including the `update-ldcache` hook design doc 02 calls out — with 50 library
+mounts and the `env` block kept. The dropped list showed `/dev/nvidia-uvm` at
+host major **236**, the dynamically-allocated major that will not match the
+guest's; the script says so in its output.

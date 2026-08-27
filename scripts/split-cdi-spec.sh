@@ -155,10 +155,13 @@ else:
 
 # ---- (b) the deviceNodes it dropped
 def node_row(n):
+    # CDI omits major/minor when they are 0 (omitempty), and 0 is a real device
+    # number -- printing an empty cell there reads like a wildcard. Default to 0.
     return (n.get("path", "?"), n.get("type", "c"),
-            n.get("major", ""), n.get("minor", ""),
+            n.get("major", 0), n.get("minor", 0),
             n.get("permissions", "rw"), n.get("hostPath", ""))
 
+seen_note = [False]
 sys.stderr.write("\n== dropped deviceNodes (%d) — these must come from the GUEST ==\n" % len(dropped_nodes))
 if not dropped_nodes:
     sys.stderr.write("  (none: the input spec had no deviceNodes)\n")
@@ -166,6 +169,8 @@ for where, n in dropped_nodes:
     p, t, ma, mi, perm, hp = node_row(n)
     sys.stderr.write("  %-28s %s %s:%s %-4s  from device %s%s\n"
                      % (p, t, ma, mi, perm, where, ("  hostPath=" + hp) if hp else ""))
+    if not seen_note[0] and str(n.get("path", "")).startswith("/dev/nvidia-uvm"):
+        seen_note[0] = True
 if dropped_hooks:
     sys.stderr.write("\n== dropped hooks (%d) — Kata's shim drops these anyway "
                      "(kata-containers#11169) ==\n" % len(dropped_hooks))
@@ -176,6 +181,14 @@ if dropped_hooks:
     sys.stderr.write("  -> if one of these was `update-ldcache`, replace it with an\n"
                      "     LD_LIBRARY_PATH entry in containerEdits.env, or regenerate\n"
                      "     the ldcache inside the guest. See design doc 02.\n")
+
+if seen_note[0]:
+    sys.stderr.write("\n  NOTE: /dev/nvidia-uvm* majors are allocated dynamically and\n"
+                     "        independently on host and guest, so the numbers above are\n"
+                     "        HOST numbers and will not match the guest's. This is the\n"
+                     "        wrinkle in design doc 01 s4(a): request the host-side kind\n"
+                     "        on the pod sandbox and the guest-side kind on the workload\n"
+                     "        container, never the same spec on both.\n")
 
 if a.dropped:
     payload = {"droppedDeviceNodes": [dict(device=w, **n) for w, n in dropped_nodes],

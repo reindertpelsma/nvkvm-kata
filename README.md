@@ -1,8 +1,16 @@
 # nvkvm-kata
 
-**Status: DESIGN ONLY. Nothing here is runnable.** This repository contains a
-design document and a skeleton. There is no code, no build, no packaging. Every
-script under `scripts/` is a clearly-marked stub that refuses to run.
+**Status: DESIGN, plus one measured result.** This repository is a design
+document and a skeleton — no build, no packaging. Two scripts are now real and
+self-testing (`check-vmm-device-access.sh`, `split-cdi-spec.sh`); the rest is
+still a clearly-marked stub that refuses to run.
+
+**The gating unknown has been measured.** See
+[01 §1.4](docs/design/01-vmm-confinement.md) — on cgroup v2 the Kata hypervisor
+can open `/dev/nvidiactl` and every other NVIDIA node, unconfigured, for both
+`sandbox_cgroup_only` values, on both Kata runtimes, verified against a real GPU
+and driver. Not because Kata permits it, but because Kata's device policy is
+silently discarded on cgroup v2 before it is ever attached.
 
 ## The pitch, in one paragraph
 
@@ -28,7 +36,7 @@ part. **That was wrong, and the inversion is the main result.**
 
 | piece | status |
 |---|---|
-| VMM opening the **host** GPU device nodes | **the open question.** Kata builds the sandbox device cgroup itself, as an allowlist that does not include `/dev/nvidia*` — [01](docs/design/01-vmm-confinement.md) |
+| VMM opening the **host** GPU device nodes | **MEASURED, and it works today by accident.** Kata builds the sandbox device cgroup itself as an allowlist that excludes `/dev/nvidia*` — and then, on cgroup v2, never installs it, so the VMM opens every NVIDIA node read-write with no configuration. Confirmed on a real RTX 3060. Treat as temporary — [01](docs/design/01-vmm-confinement.md) |
 | host NVIDIA **libraries** into the container | works via CDI mounts → virtio-fs; CDI **hooks** are dropped by Kata's shim — [02](docs/design/02-libraries-via-cdi.md) |
 | **guest-resident device nodes** into the container | expected to be novel; **it is not.** kata-agent already applies CDI specs found inside the guest — [03](docs/design/03-guest-side-devices.md) |
 | shipping an out-of-tree module in Kata's guest kernel | strong precedent (`build-kernel.sh -g nvidia` already builds one) — [04](docs/design/04-guest-kernel.md) |

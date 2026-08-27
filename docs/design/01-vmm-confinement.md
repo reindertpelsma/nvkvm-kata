@@ -1,22 +1,34 @@
 # 01 — What confinement does Kata put the VMM in, by default?
 
-**This is the gating question for the whole project, and it is the largest
-remaining unknown.** If the Kata hypervisor process cannot `open()` the host's
+**This was the gating question for the whole project, and the largest remaining
+unknown. It has been measured — 2026-08-27, on two hosts, one of them with a
+real NVIDIA GPU.** If the Kata hypervisor process cannot `open()` the host's
 `/dev/nvidiactl` and `/dev/nvidia*`, nvkvm cannot forward a single ioctl and
-nothing else in this design matters.
+nothing else in this design matters. It can.
 
-The short answer, with the reasoning below:
+**It has now been measured** (§1.4, §1.6). The short answer:
 
-> The device cgroup is the gate, not the namespaces and not the file
-> permissions. QEMU under Kata runs as **root** in the host mount, PID and user
-> namespaces (only the network namespace confines it), so DAC is not an
-> obstacle. But Kata's shim **builds the sandbox's device cgroup itself**, as a
-> targeted allowlist — OCI-spec devices plus a hardcoded set (`/dev/kvm`,
-> `/dev/vfio/vfio`, `/dev/vhost-net`, `/dev/vhost-vsock`, the safe chardevs).
-> **The NVIDIA nodes are not in that set.** So this is **NOT** the easy case:
-> the nodes must be granted explicitly. The good news is that the supported way
-> to grant them already exists and needs no Kata patch — declare them on the
-> OCI spec Kata is handed, and Kata copies them into the sandbox cgroup.
+> **On a cgroup v2 host, the Kata-launched QEMU CAN open `/dev/nvidiactl`,
+> `/dev/nvidia0`, `/dev/nvidia-uvm` and `/dev/dri/renderD128` — read-write, with
+> no configuration, for both values of `sandbox_cgroup_only`.** Verified on a
+> real NVIDIA GPU with a real driver. Not because Kata allows them: because on
+> cgroup v2 **Kata installs no device policy at all.** It computes the allowlist
+> the code below describes and then loses it at the
+> `containerd/cgroups` `v2.ToResources()` boundary, which never populates
+> `Resources.Devices`. `/dev/mem` opens from the sandbox cgroup too, which is
+> how you can tell nothing is being enforced.
+>
+> The design's reading of *what Kata intends* is correct — a targeted allowlist
+> of OCI-spec devices plus a hardcoded set (`/dev/kvm`, `/dev/vfio/vfio`,
+> `/dev/vhost-net`, `/dev/vhost-vsock`, the safe chardevs), with the NVIDIA
+> nodes absent. A cgroup carrying exactly that policy denies `/dev/nvidiactl`
+> with `EPERM`; that counterfactual was run (§1.4.5). Only the installation is
+> missing, and **only on cgroup v2** — the v1 path writes the rules.
+>
+> So: **this is currently the easy case, and it should not be treated as one.**
+> Kata plainly intends to restrict, so expect the gap to be closed. Build route
+> (a) — the host CDI spec — anyway; it is the only route that is correct on both
+> cgroup versions, and the one that survives the fix.
 
 ---
 
@@ -94,6 +106,13 @@ read or write — precisely the permission nvkvm needs and does not get.
 VMM rather than the isolate holds open — see
 `nvkvm-pv/docs/internal/isolate-model.md`, "Who opens what").
 
+**Everything in this section is a reading of what Kata computes, and it is
+accurate — a cgroup carrying exactly this list denies every NVIDIA node with
+`EPERM` while permitting `/dev/kvm`, which was run as a control (§1.4.5).
+On cgroup v2, however, the list computed here is never installed on any cgroup
+(§1.6), so nothing in it is in force.** Read §1.2 as "what Kata means", and
+§1.4/§1.6 as "what a running system does".
+
 ### 1.3 A correction worth making explicitly
 
 A tempting shortcut is: "QEMU runs as root, and root bypasses cgroups." **That
@@ -121,72 +140,356 @@ program (`src/nvcgo/internal/cgroup/v2.go`, `PrependDeviceFilter`). This is why
 every recommendation in this repo puts the allow rule **into the OCI spec
 before the runtime configures the cgroup**, never into a hook afterwards.
 
-**UNVERIFIED:** I did not read `security/device_cgroup.c` directly in this pass.
-Settle by reading it, or empirically: put a root shell in a cgroup whose
-`devices.list` excludes a node and try to open it.
+**MEASURED — root does not bypass a device cgroup.** The experiment suggested
+here was run (§1.4.5's counterfactual, and again in the harness self-test): a
+**root** process moved into a cgroup carrying a `BPF_CGROUP_DEVICE` filter gets
+`EPERM` on `open()` of any node the filter does not allow — `/dev/nvidiactl`,
+`/dev/nvidia0`, `/dev/nvidia-uvm`, `/dev/dri/renderD128` and `/dev/mem` all
+returned `EPERM` while `/dev/kvm` and `/dev/null` opened, in the same process,
+in the same call. Being root is not an exemption. This is the one assumption in
+this document that everything else rests on, and it holds.
 
-### 1.4 Which cgroup, and what `sandbox_cgroup_only` changes
+### 1.4 Which cgroup, and what `sandbox_cgroup_only` changes — **MEASURED**
 
-Also from `docs/design/host-cgroups.md`:
+> **This section was a prediction. It is now a measurement, and the prediction
+> was wrong in an interesting way.** What follows is what was run, on what, and
+> what came back. The reasoning that produced the (incorrect) prediction is kept
+> at the end of the section, because the code it cites is still accurate — it is
+> the conclusion drawn from it that did not survive contact with a running
+> system.
 
-- **`sandbox_cgroup_only = true`** — the shim "will move itself to it, **before**
-  starting the virtual machine. As a consequence all processes subsequently
-  created by the Kata Containers shim (the VMM itself, and all vCPU and I/O
-  related threads) will be created in the `/kata_<PodSandboxID>` cgroup." Under
-  Kubernetes that is `/kubepods/kata_<PodSandboxID>`.
-- **`sandbox_cgroup_only = false`** — "The Kata Containers shim will move itself
-  to the overhead cgroup first, and then move the vCPU threads to the sandbox
-  cgroup as they're created. All Kata processes and threads will run under the
-  overhead cgroup except for the vCPU threads." The overhead cgroup is
-  `/kata_overhead/<sandbox-id>` and Kata "does not add any constraints or
-  limitations" on it.
+#### 1.4.1 The measured answer
 
-Default is **`false`** (`DEFSANDBOXCGROUPONLY ?= false` in
-`src/runtime/Makefile`) — but Kata's own NVIDIA build profile sets
-`DEFSANDBOXCGROUPONLY_NV = true`, with the comment that leaving it false "can
-lead to cgroup leakages in the host. Best practice for production is to set
-this to true."
+**On a cgroup v2 (unified) host, the Kata-launched QEMU can open the host's
+NVIDIA device nodes, and `sandbox_cgroup_only` makes no difference — because
+Kata's Go runtime never installs a device policy on cgroup v2 at all.**
 
-**What this changes for us is which cgroup the QEMU main thread sits in**, and
-therefore which device policy applies to it — the constrained
-`/kubepods/.../kata_<id>` one, or the unconstrained overhead one. The QEMU main
-thread is where nvkvm's virtio-nvgpu device lives and where the isolates are
-spawned from, so it is the thread that matters.
+| `sandbox_cgroup_only` | cgroup QEMU lands in | device filter on it | `open("/dev/nvidiactl")` |
+|---|---|---|---|
+| `false` (default) | `/default/kata_<sandbox-id>` — the **sandbox** cgroup | **none attached, at any level to the root** | **not denied** |
+| `true` (NVIDIA profile) | `/default/kata_<sandbox-id>` — the **sandbox** cgroup | **none attached, at any level to the root** | **not denied** |
 
-**UNVERIFIED, and this is the single most important thing to measure.** The
-overhead cgroup is created with an **empty** resource set
-(`sandbox.go:1012`):
+Both values: **PASS**. Neither the predicted inversion nor the predicted
+denial occurred.
 
-```go
-overheadController, err := resCtrl.NewResourceController(fmt.Sprintf("%s%s", resCtrlKataOverheadID, s.id), &specs.LinuxResources{})
+Measured twice, on two independent hosts, with two containerd major versions,
+and — on the second — against a real GPU with a real driver and the real device
+nodes, plus once more against the **Rust** runtime:
+
+| host | GPU | containerd | Kata runtime | nodes | result |
+|---|---|---|---|---|---|
+| A — test host, kernel 7.0.0-29 | none | 2.2.3 | Go 4.1.0 | synthesised `c 195:255`, `c 195:0` | PASS / PASS |
+| B — rented RTX 3060, Ubuntu 22.04, kernel 6.8.0-59 | RTX 3060, driver 575.51.03 | 1.7.27 | Go 4.1.0 | **real** | PASS / PASS |
+| A — same host | none | 2.2.3 | **runtime-rs 4.1.0** | synthesised | PASS / PASS |
+
+#### 1.4.2 What was run
+
+`scripts/check-vmm-device-access.sh --synthesise-nodes --device /dev/mem`,
+which starts a Kata sandbox with `ctr`, finds the hypervisor process, dumps its
+cgroup and that cgroup's device policy, then **joins that exact cgroup with a
+probe process and calls `open()`**.
+
+| | host A (no GPU) | host B (rented, GPU) |
+|---|---|---|
+| date | 2026-08-27 | 2026-08-27 |
+| kernel | `7.0.0-29-generic`, x86_64 | `6.8.0-59-generic`, x86_64, Ubuntu 22.04.5 |
+| cgroup mode | **v2 unified** (`stat -fc %T /sys/fs/cgroup` = `cgroup2fs`) | **v2 unified** |
+| containerd | `v2.2.3`, cgroupfs driver, `ctr run --runtime io.containerd.kata.v2` | `1.7.27`, same |
+| Kata | `kata-go-static-4.1.0-amd64` — the **Go** runtime, `kata-runtime 4.1.0`, commit `ddcb1ad8`; and separately `kata-static-4.1.0-amd64`, the **runtime-rs** build | `kata-go-static-4.1.0-amd64` |
+| hypervisor | `/opt/kata/bin/qemu-system-x86_64`, `-machine q35,accel=kvm` | same |
+| config | `/etc/kata-containers/configuration.toml`, from the shipped `configuration-qemu.toml` | same |
+| SELinux | not installed; `/proc/<qemu-pid>/attr/current` = `unconfined` | same |
+| GPU | none | **NVIDIA GeForce RTX 3060**, `/proc/driver/nvidia/version` = `575.51.03` |
+| NVIDIA nodes | **synthesised**: `mknod /dev/nvidiactl c 195 255`, `mknod /dev/nvidia0 c 195 0`, no driver bound — see 1.4.6 | **real**: `/dev/nvidiactl` `c 195:255`, `/dev/nvidia0` `c 195:0`, `/dev/nvidia-uvm` `c 236:0`, `/dev/nvidia-uvm-tools` `c 236:1`, `/dev/dri/renderD128` `c 226:128` |
+
+Host B was a vast.ai KVM instance (`systemd-detect-virt` = `kvm`, `/dev/kvm`
+present, GPU VFIO-passed-through), so the Kata VM ran as a nested guest. It was
+destroyed after the run.
+
+Two shipped defaults were confirmed on disk while doing this, both as the design
+claimed: `configuration-qemu.toml` ships `sandbox_cgroup_only = false` (line
+658) and `configuration-qemu-nvidia-gpu.toml` ships `sandbox_cgroup_only = true`
+(line 689).
+
+#### 1.4.3 The exact cgroup path
+
+`sandbox_cgroup_only=false` (the default), sandbox `nvkvm-kata-q1-sco-false-1102923`:
+
+```
+$ cat /proc/1103077/cgroup                    # the QEMU main thread
+0::/default/kata_nvkvm-kata-q1-sco-false-1102923
+
+$ cat /run/vc/sbs/<id>/persist.json | jq …
+SandboxCgroupPath  = /default/kata_<id>
+OverheadCgroupPath = /kata_overhead/<id>
 ```
 
-and `resCtrlKataOverheadID = "/kata_overhead/"` (`sandbox.go:83`) — a path at
-the **cgroup root**, not under `kubepods`. `NewResourceController`
-(`src/runtime/pkg/resourcecontrol/cgroups.go:153`) passes that empty set
-straight to `cgroups.New(cgroups.V1, ...)` or `cgroupsv2.NewManager(...)`.
+The overhead cgroup **is** created — `/sys/fs/cgroup/kata_overhead/<id>` exists —
+but **QEMU is not in it.** In a separate run its membership was enumerated
+directly:
 
-Reasoning from cgroup semantics, this points at a surprising answer: with an
-empty device list, **no** device rules are written, so on v1 the new cgroup
-inherits its parent's whitelist — and its parent chain reaches the root, which
-is `a *:* rwm`; and on v2 no `BPF_CGROUP_DEVICE` program is attached and there
-is no ancestor program to inherit, since the path is not under `kubepods`.
-**If that holds, then with the default `sandbox_cgroup_only=false` the QEMU main
-thread lands somewhere device-unrestricted and the NVIDIA nodes are reachable
-for free** — while `sandbox_cgroup_only=true` (Kata's own NVIDIA-profile
-default, and the production recommendation) puts it in the *restricted* sandbox
-cgroup and breaks it. That is an uncomfortable inversion: the safer-looking
-setting is the one that blocks us.
+```
+/sys/fs/cgroup/kata_overhead/<id>/cgroup.procs   -> 1099887 1099897 1099902
+                                                    (shim + two virtiofsd)
+/sys/fs/cgroup/default/kata_<id>/cgroup.procs    -> 1099900   (QEMU)
+$ cat /proc/1099887/cgroup                        # the shim
+0::/kata_overhead/<id>
+```
 
-I did not verify this empirically and it turns on `containerd/cgroups` v1.1.0
-behaviour that is not vendored in this tree, so treat it as a hypothesis, not a
-finding.
-**Experiment:** on a node running a Kata pod, with each setting in turn:
-`cat /proc/$(pgrep -f qemu-system-x86_64)/cgroup`, then for v1
-`cat /sys/fs/cgroup/devices/<that path>/devices.list`, and for v2
-`bpftool cgroup show /sys/fs/cgroup/<that path>` plus
-`bpftool prog dump xlated id <n>`. Then simply attempt the open, from that
-cgroup, and see. `scripts/check-vmm-device-access.sh` is the stub for this.
+and every one of QEMU's threads — main, `CPU 0/KVM`, `vhost-*`,
+`IO mon_iothread`, `call_rcu` — reported the **same** sandbox cgroup, not a mix.
+
+With `sandbox_cgroup_only=true` the path is the same
+(`/default/kata_<sandbox-id>`), which is expected: with no overhead controller
+everything is in the sandbox cgroup by construction.
+
+**Why the whole QEMU process moves, and not just its vCPU threads:**
+`constrainHypervisor()` moves only `tids.vcpus` with `sandboxController.AddThread(i)`
+(`sandbox.go:2816-2827`) — but on cgroup v2 `AddThread` is not thread-granular:
+
+```go
+func (c *LinuxCgroup) AddThread(pid int, subsystems ...string) error {
+	switch cg := c.cgroup.(type) {
+	case cgroups.Cgroup:
+		return cg.AddTask(cgroups.Process{Pid: pid})   // v1: cgroup "tasks", per-thread
+	case *cgroupsv2.Manager:
+		return cg.AddProc(uint64(pid))                 // v2: cgroup.procs, WHOLE PROCESS
+	}
+}
+```
+— `src/runtime/pkg/resourcecontrol/cgroups.go:340-348`
+
+Writing a thread id to `cgroup.procs` migrates the entire thread group. So on
+cgroup v2 the "move only the vCPU threads" design collapses into "move all of
+QEMU", and the QEMU main thread ends up in the **sandbox** cgroup for **both**
+values of `sandbox_cgroup_only`. **The predicted overhead-cgroup inversion does
+not exist on cgroup v2.** (On v1 it plausibly does — `AddTask` there really is
+per-thread — but that is UNVERIFIED, see 1.4.7.)
+
+#### 1.4.4 The exact device policy dump
+
+```
+--- cgroup v2 BPF_CGROUP_DEVICE programs, walking up to the root ---
+[/default/kata_nvkvm-kata-q1-sco-false-1102923]  no BPF_CGROUP_DEVICE program attached
+[/default]                                       no BPF_CGROUP_DEVICE program attached
+[/]                                              no BPF_CGROUP_DEVICE program attached
+```
+
+identically for `sandbox_cgroup_only=true`. **There is no device policy. Not a
+permissive one — none at all.**
+
+On host B `bpftool` refused to answer at all (`Error: can't query bpf programs
+attached to …: No such device or address`, on every cgroup including the root —
+a bpftool 7.4.0 / kernel 6.8 skew). So the script no longer depends on it: it
+asks the kernel the same question `bpftool` would, via `BPF_PROG_QUERY` with
+`attach_type=BPF_CGROUP_DEVICE` and `BPF_F_QUERY_EFFECTIVE`, which counts this
+cgroup's programs **plus every ancestor's** — precisely the set that gates
+`open()` for a task in it. On host B, with a real GPU:
+
+```
+BPF_PROG_QUERY(BPF_CGROUP_DEVICE), asked of the kernel directly:
+  /sys/fs/cgroup/default/kata_nvkvm-kata-q1-sco-false-2627 effective=0 attached=0 ids=- -> device-UNRESTRICTED
+  /sys/fs/cgroup/default                                   effective=0 attached=0 ids=- -> device-UNRESTRICTED
+  /sys/fs/cgroup/                                          effective=0 attached=0 ids=- -> device-UNRESTRICTED
+```
+
+and identically for `sandbox_cgroup_only=true`. `effective=0` at the leaf is a
+complete answer: there is no program anywhere on the path, so nothing can deny
+anything.
+
+This is not a `bpftool` failure. On the same host, at the same moment, `bpftool`
+happily enumerates the `cgroup_device` programs systemd attaches to its own
+units:
+
+```
+$ bpftool cgroup tree
+/sys/fs/cgroup/system.slice/systemd-journald.service
+    1241     cgroup_device   multi           sd_devices
+/sys/fs/cgroup/system.slice/polkit.service
+    1225     cgroup_device   multi           sd_devices
+…
+```
+
+And it is not because Kata had nothing to install. The OCI spec containerd
+handed the shim carries the full deny-all-plus-allowlist that
+`createResourceController()` reads from `spec.Linux.Resources.Devices`:
+
+```
+$ ctr container info <id> | jq .Spec.linux.resources.devices
+{"allow": false, "access": "rwm"}                                  <- deny-all
+{"allow": true, "type": "c", "major": 1, "minor": 3, "access": "rwm"}
+{"allow": true, "type": "c", "major": 1, "minor": 8, "access": "rwm"}
+… /dev/tty, /dev/zero, /dev/full, /dev/urandom, /dev/console, 136:*, /dev/ptmx
+$ ctr container info <id> | jq .Spec.linux.cgroupsPath
+"/default/katathr"
+```
+
+That also settles the second UNVERIFIED item in §4(a): **the OCI spec that feeds
+`createResourceController()` is the one containerd builds for the container it
+is handed**, `linux.cgroupsPath` and all, and its `linux.resources.devices` is a
+deny-all followed by the curated safe set. Kata reads it, appends
+`sandboxDevices()` to it — and then loses the result (§1.6).
+
+#### 1.4.5 The `open()` results
+
+From inside `/default/kata_<sandbox-id>` — the probe prints its own
+`/proc/self/cgroup` first, so there is no doubt which cgroup it measured:
+
+```
+probe: pid=1103211 cgroup=0::/default/kata_nvkvm-kata-q1-sco-false-1102923
+  /dev/kvm                   OPEN-OK     [c 10:232  ] O_RDWR
+  /dev/nvidiactl             OPEN-FAIL   [c 195:255 ] errno=ENXIO ALLOWED-BY-CGROUP, no driver bound
+  /dev/nvidia0               OPEN-FAIL   [c 195:0   ] errno=ENXIO ALLOWED-BY-CGROUP, no driver bound
+  /dev/mem                   OPEN-OK     [c 1:1     ] O_RDWR
+```
+
+```
+probe: pid=1103435 cgroup=0::/default/kata_nvkvm-kata-q1-sco-true-1102923
+  /dev/kvm                   OPEN-OK     [c 10:232  ] O_RDWR
+  /dev/nvidiactl             OPEN-FAIL   [c 195:255 ] errno=ENXIO ALLOWED-BY-CGROUP, no driver bound
+  /dev/nvidia0               OPEN-FAIL   [c 195:0   ] errno=ENXIO ALLOWED-BY-CGROUP, no driver bound
+  /dev/mem                   OPEN-OK     [c 1:1     ] O_RDWR
+```
+
+**`/dev/mem` is the load-bearing line.** Character device `1:1` is not in the
+OCI spec's allowlist, not in `defaultDevices`, not in `hypervisorDevices`, not
+in `virtualDevices`, and the two wildcard entries are `m`-only. If Kata's device
+cgroup were doing anything at all, `open("/dev/mem", O_RDWR)` from inside the
+sandbox cgroup would return `EPERM`. It returns a file descriptor. In the same
+run `/dev/vhost-net` and `/dev/loop-control` also opened, which is consistent
+but proves less, since those *are* on the list.
+
+`/dev/kvm` opening is the positive control: Kata's `sandboxDevices()` always
+allows it, and had it failed the harness would have reported the run **VOID**
+rather than PASS, on the grounds that the probe cannot have been measuring the
+right cgroup.
+
+**On host B, with the real driver loaded and the real nodes present**, the same
+probe inside the same kind of cgroup:
+
+```
+probe: pid=2177 cgroup=0::/default/kata_nvkvm-kata-q1-sco-false-1996
+  /dev/kvm                   OPEN-OK     [c 10:232  ] O_RDWR
+  /dev/nvidiactl             OPEN-OK     [c 195:255 ] O_RDWR
+  /dev/nvidia0               OPEN-OK     [c 195:0   ] O_RDWR
+  /dev/nvidia-uvm            OPEN-OK     [c 236:0   ] O_RDWR
+  /dev/nvidia-uvm-tools      OPEN-OK     [c 236:1   ] O_RDWR
+  /dev/nvidia-modeset        ABSENT      (stat: ENOENT)
+  /dev/dri/renderD128        OPEN-OK     [c 226:128 ] O_RDWR
+  /dev/mem                   OPEN-OK     [c 1:1     ] O_RDWR
+```
+
+— and byte-identically for `sandbox_cgroup_only=true`. **Every node nvkvm needs
+opens read-write from inside the Kata sandbox cgroup.** (`/dev/nvidia-modeset`
+is absent because nothing had loaded `nvidia-modeset` on that box, not because
+it was denied.)
+
+##### The counterfactual: what Kata's intended policy *would* do
+
+Run on host B, against the same real device nodes: a cgroup carrying exactly the
+policy Kata computes and does not install — `DevicePolicy=strict` plus
+`DeviceAllow` for `sandboxDevices()`' list and the OCI safe set.
+
+```
+  …run-rec701e…scope  effective=1 attached=1 ids=[79] -> device-RESTRICTED by 1 effective program(s)
+probe: pid=4316 cgroup=0::/system.slice/run-rec701e…scope
+  /dev/kvm                   OPEN-OK     [c 10:232  ] O_RDWR
+  /dev/null                  OPEN-OK     [c 1:3     ] O_RDWR
+  /dev/nvidiactl             OPEN-FAIL   [c 195:255 ] errno=EPERM DENIED-BY-CGROUP
+  /dev/nvidia0               OPEN-FAIL   [c 195:0   ] errno=EPERM DENIED-BY-CGROUP
+  /dev/nvidia-uvm            OPEN-FAIL   [c 236:0   ] errno=EPERM DENIED-BY-CGROUP
+  /dev/dri/renderD128        OPEN-FAIL   [c 226:128 ] errno=EPERM DENIED-BY-CGROUP
+  /dev/mem                   OPEN-FAIL   [c 1:1     ] errno=EPERM DENIED-BY-CGROUP
+```
+
+This is the load-bearing control for the whole document, and it establishes
+three things at once:
+
+1. **§1.2's reading of Kata's allowlist is correct.** That policy really does
+   deny every NVIDIA node while permitting `/dev/kvm`. The design was right
+   about what Kata means to do.
+2. **These specific device nodes on this specific host are deniable.** The PASS
+   above is not some property of `/dev/nvidia*` being exempt from device
+   cgroups; the identical nodes return `EPERM` two commands later.
+3. **The only difference between PASS and FAIL is whether the policy got
+   installed.** Which is §1.6.
+
+#### 1.4.6 Why synthetic device nodes answer the real question
+
+The host used for this measurement has no NVIDIA GPU, so `/dev/nvidiactl` and
+`/dev/nvidia0` were created with `mknod` at the majors nvkvm deliberately
+registers at (195; `nvkvm-pv/docs/reference/device-nodes.md`), with no driver
+behind them.
+
+This is not a weaker experiment for the question being asked, because the device
+cgroup is keyed on `(type, major, minor)` and is enforced in an LSM hook on
+`open()` **before** the driver's `->open()` ever runs. So:
+
+- `EPERM` ⇒ the cgroup denied the node. This is the Q1 failure mode, and it is
+  what the design predicted.
+- `ENXIO` ⇒ the cgroup **allowed** it and the kernel then found no driver bound
+  at `195:x`. The cgroup gate was passed.
+
+`ENXIO` is therefore a PASS on the cgroup question, and the identical `ENXIO`
+from the caller's unrestricted cgroup (printed as a control in every run)
+confirms `ENXIO` is what "allowed, but no driver" looks like on this host.
+
+What synthetic nodes cannot tell you is anything downstream of the cgroup — that
+a real `/dev/nvidiactl` `open()` succeeds, that `ioctl` forwarding works, or
+that a real driver is happy. Those are Phase 1/2 questions, not Q1.
+
+#### 1.4.7 What is still UNVERIFIED
+
+- **cgroup v1.** Not measured — the host boots unified, and `cgroups.Mode()`
+  keys off `/sys/fs/cgroup`'s filesystem type, so the v1 path cannot be reached
+  without a reboot. **From source, the v1 answer is expected to be the
+  opposite** (§1.6): `cgroups.New(cgroups.V1, …)` passes `*specs.LinuxResources`
+  straight through, and `devicesController.Create` writes every entry to
+  `devices.allow`/`devices.deny`, deny-all included. So on a legacy or hybrid
+  host the sandbox cgroup should be a real allowlist and `/dev/nvidiactl` should
+  be **denied**. Treat "v2 is unrestricted" as measured and "v1 restricts" as
+  read-from-source-only.
+- ~~**runtime-rs.**~~ **Also MEASURED, same answer.** `kata-static-4.1.0-amd64`
+  (the Rust shim, `/opt/kata/runtime-rs/bin/containerd-shim-kata-v2`) was
+  installed on host A and run through the same experiment. Both
+  `sandbox_cgroup_only` values: `effective=0 attached=0` on the QEMU cgroup and
+  every ancestor, `/dev/mem` opens, synthetic `/dev/nvidiactl` returns `ENXIO`.
+  **PASS / PASS.** One structural difference worth recording: runtime-rs does
+  **not** create a `kata_<id>` sandbox cgroup at all — QEMU sits directly in the
+  containerd-provided path (`/default/<container-id>`) for both values of
+  `sandbox_cgroup_only`, where the Go runtime uses `/default/kata_<id>`. Its
+  shipped `configuration-qemu-runtime-rs.toml` also defaults
+  `sandbox_cgroup_only = true`, unlike the Go `configuration-qemu.toml`.
+  The Rust code path was not read; only its behaviour was measured.
+- **Kubernetes.** Measured under `ctr`, so the cgroup parent is `/default/…`
+  rather than `/kubepods/…`. The mechanism is parent-independent — no device
+  program is attached anywhere on the path to the root — but a kubelet-managed
+  parent that itself carried a `BPF_CGROUP_DEVICE` program would change the
+  answer, and that was not tested.
+- **A real driver.** See 1.4.6.
+
+#### 1.4.8 The prediction this replaces, and why it was wrong
+
+The original reasoning ran: `sandbox_cgroup_only=false` makes the shim move
+itself to `/kata_overhead/<id>`, which is created with an **empty** resource set
+(`sandbox.go:1012`, `&specs.LinuxResources{}`) at a path outside `kubepods`;
+therefore QEMU, forked from the shim, inherits a device-unrestricted cgroup,
+while `sandbox_cgroup_only=true` puts it in the restricted sandbox cgroup and
+breaks nvkvm. An uncomfortable inversion: the safer-looking setting blocks us.
+
+Every code citation in that paragraph is correct. The conclusion is wrong for
+two independent reasons, and either one alone would have been enough:
+
+1. QEMU does **not** stay in the cgroup it was forked into. `constrainHypervisor`
+   moves it, and on cgroup v2 that move is process-granular (§1.4.3), so QEMU
+   ends up in the *sandbox* cgroup either way.
+2. The sandbox cgroup is not restricted on cgroup v2 in the first place (§1.6),
+   so there is nothing for the inversion to invert.
+
+The lesson worth keeping: the argument reasoned carefully about which cgroup a
+process is *placed in* and never checked whether the policy it worried about was
+ever *installed*. Both halves needed measuring; only one was identified as
+needing it.
 
 ### 1.5 What the surrounding platform contributes
 
@@ -211,6 +514,111 @@ adds the NVIDIA nodes on its own.
 
 ---
 
+### 1.6 The root cause: on cgroup v2 the device list is computed and then thrown away — **MEASURED**
+
+§1.4 measured that nothing is enforced. This is why, and it is a two-line
+answer sitting in a dependency.
+
+`NewResourceController()` is the single place Kata turns its computed
+`specs.LinuxResources` into a live cgroup
+(`src/runtime/pkg/resourcecontrol/cgroups.go:154-186`):
+
+```go
+if cgroups.Mode() == cgroups.Legacy || cgroups.Mode() == cgroups.Hybrid {
+	cgroup, err = cgroups.New(cgroups.V1, cgroups.StaticPath(cgroupPath), resources)
+} else if cgroups.Mode() == cgroups.Unified {
+	cgroup, err = cgroupsv2.NewManager(unifiedMountpoint, cgroupPath, cgroupsv2.ToResources(resources))
+}
+```
+
+Note the asymmetry. The **v1** branch hands `*specs.LinuxResources` through
+whole. The **v2** branch converts it first, with
+`containerd/cgroups` v1.1.0's `v2.ToResources()` — and that function translates
+CPU, memory, hugetlb, pids, blkio and RDMA, and **never assigns
+`Resources.Devices`**. The word `Devices` does not appear anywhere in
+`v2/utils.go`:
+
+```
+$ grep -n Devices v2/utils.go        # containerd/cgroups v1.1.0
+(none)
+```
+
+The receiving struct has the field, and `NewManager` does act on it — gated
+exactly the way that makes the omission silent
+(`containerd/cgroups` v1.1.0 `v2/manager.go`):
+
+```go
+type Resources struct {
+	CPU     *CPU
+	Memory  *Memory
+	Pids    *Pids
+	IO      *IO
+	RDMA    *RDMA
+	HugeTlb *HugeTlb
+	// When len(Devices) is zero, devices are not controlled
+	Devices []specs.LinuxDeviceCgroup
+}
+…
+	if err := setDevices(path, resources.Devices); err != nil {   // manager.go:220
+```
+
+`len(Devices)` is always zero on this path, so `setDevices` attaches nothing and
+returns nil. No error is logged, nothing fails, and the sandbox cgroup is
+created device-unrestricted. That is exactly what `bpftool` reports (§1.4.4).
+
+The v1 branch, by contrast, does enforce. `containerd/cgroups` v1.1.0
+`devices.go`:
+
+```go
+func (d *devicesController) Create(path string, resources *specs.LinuxResources) error {
+	os.MkdirAll(d.Path(path), defaultDirPerm)
+	for _, device := range resources.Devices {
+		file := denyDeviceFile
+		if device.Allow { file = allowDeviceFile }
+		if device.Type == "" { device.Type = "a" }
+		retryingWriteFile(filepath.Join(d.Path(path), file), []byte(deviceString(device)), …)
+	}
+}
+```
+
+— every entry written, and the OCI spec's leading `{"allow": false, "access":
+"rwm"}` (§1.4.4) becomes `a *:* rwm` into `devices.deny`, i.e. a real deny-all
+followed by the allowlist.
+
+#### What this means for the design
+
+**The gate the whole project was organised around is, on cgroup v2 with the Go
+runtime, not closed.** Three consequences, in order of how much they change the
+plan:
+
+1. **Route (a) — the host CDI spec — is not required to make nvkvm work on a v2
+   host.** It is still the right thing to ship, for the reasons in §4(a) and
+   because it is the only route that is correct on *both* cgroup versions. But
+   it is no longer load-bearing for a v2 prototype: the nodes are already
+   reachable.
+2. **Route (c) — patching `sandboxDevices()` — would not help on v2 at all.**
+   Adding the NVIDIA nodes to that list appends entries to a `[]LinuxDeviceCgroup`
+   that `ToResources()` discards. Anyone reaching for that patch on a v2 host
+   would see no change and would have a very confusing afternoon. If the list
+   is to be patched, the `ToResources()` gap has to be fixed first or at the
+   same time.
+3. **Do not build on this.** A Kata sandbox on cgroup v2 not restricting devices
+   is, from Kata's point of view, a bug — the code plainly intends an allowlist,
+   and `/dev/mem` opening from a sandbox cgroup is not a defensible posture for
+   a project whose pitch is isolation. It is reasonable to expect it to be
+   fixed. A design that quietly depends on it working today is a design that
+   breaks on a patch release. So: **treat the v2 result as "the gate is
+   currently open, and will close", implement route (a) anyway, and use the open
+   gate only to unblock Phase 1 and 2 work while route (a) is built.**
+
+This is also worth reporting upstream on its own merits, independently of nvkvm.
+It is a silent security-relevant divergence between cgroup v1 and cgroup v2
+hosts, and the code reads as if it were version-agnostic.
+
+**UNVERIFIED:** whether `src/runtime-rs` (the Rust shim, shipped as
+`kata-static-*.tar.zst`) has the same gap. It has its own cgroup layer and was
+not measured.
+
 ## 2. Namespaces — secondary, and mostly absent
 
 Stated briefly because they turn out not to be the gate.
@@ -221,6 +629,38 @@ Stated briefly because they turn out not to be the gate.
 | **mount** | **host mount namespace** | No `unshare`, `CLONE_NEWNS`, `pivot_root` or `chroot` in `qemu.go` or govmm's `LaunchCustomQemu`; `SysProcAttr` carries only `Credential`. There is no jailer. `/run/vc/vm/<sandbox-id>` is an ordinary host directory for sockets and the pidfile, not a root. |
 | **PID** | **host PID namespace** (inferred) | The shim runs under containerd's standard `shimapi.Run` with `NoReaper/NoSubreaper`; no `CLONE_NEWPID` anywhere in the launch path. **UNVERIFIED as an explicit statement** — settle by comparing `readlink /proc/<shim>/ns/pid` and `/proc/1/ns/pid`. |
 | **user** | **none** | `rootless = false` by default (`src/runtime/config/configuration-qemu.toml.in`: "By default QEMU VMM run as root"). Even when enabled it is a **setuid/setgid to a random uid** via `SysProcAttr.Credential`, **not** `CLONE_NEWUSER`; and it only covers QEMU — "Other processes such as Kata Container shimv2 and virtiofsd still run as the root user" (`docs/how-to/how-to-run-rootless-vmm.md`). |
+
+### MEASURED (2026-08-27, containerd 2.2.3 + Kata 4.1.0 Go runtime, `ctr`)
+
+`readlink /proc/<pid>/ns/*` for the QEMU process, its parent shim, and PID 1:
+
+```
+        qemu                     shim                     pid1
+mnt     mnt:[4026532806]         mnt:[4026532806]         mnt:[4026531832]
+pid     pid:[4026531836]         pid:[4026531836]         pid:[4026531836]
+net     net:[4026532807]         net:[4026531833]         net:[4026531833]
+user    user:[4026531837]        user:[4026531837]        user:[4026531837]
+ipc     ipc:[4026531839]         ipc:[4026531839]         ipc:[4026531839]
+uts     uts:[4026531838]         uts:[4026531838]         uts:[4026531838]
+cgroup  cgroup:[4026531835]      cgroup:[4026531835]      cgroup:[4026531835]
+```
+
+Three things to take from that:
+
+- **PID, user, IPC, UTS and cgroup namespaces are the host's.** The table's
+  UNVERIFIED note on the PID namespace is now settled: QEMU and PID 1 share it.
+- **The network namespace is QEMU's own and is *not* the shim's**, exactly as
+  `doNetNS()` implies — the shim stays in the host netns and only the fork/exec
+  of the VMM is wrapped.
+- **The mount namespace needs a correction.** The table says "host mount
+  namespace", reasoning from the absence of any `unshare`/`CLONE_NEWNS` in
+  Kata's launch path. That reasoning is right about *Kata* and wrong about the
+  outcome: QEMU is in the **containerd shim's** mount namespace, which is not
+  PID 1's (`containerd` itself was measured in `mnt:[4026531832]`, PID 1's). So
+  the VMM does get a mount namespace — it just is not Kata that creates it, and
+  Kata does not `pivot_root` or otherwise populate it, so it is a copy of the
+  host tree rather than a jail. Nothing in this design depends on it, but
+  "the VMM is in the host mount namespace" is not what a reader would find.
 
 The VMM does **not** join "the container's namespaces" — there are none on the
 host to join. `docs/design/architecture/README.md`: "Linux cgroups and
@@ -267,8 +707,13 @@ question in a way it is not under Docker:
   external `container-selinux` package (RHEL/OpenShift), **not** from the Kata
   repo (kata issue #4812). On a vanilla Ubuntu + containerd node it is very
   likely absent.
-  **UNVERIFIED per distro** — settle with `cat /proc/<qemu-pid>/attr/current`
-  and `semodule -l | grep container`.
+  **MEASURED on two distros, both negative.** `/proc/<qemu-pid>/attr/current`
+  read `unconfined` on both the Ubuntu 22.04 GPU box and the test host; neither
+  had SELinux installed at all (`getenforce` absent, no `container-selinux`).
+  So on a vanilla Ubuntu + containerd node SELinux is **not** a second gate.
+  Still **UNVERIFIED on RHEL/OpenShift**, which is precisely where
+  `container-selinux` ships and where it would matter — re-run
+  `scripts/check-vmm-device-access.sh` there, it prints the label.
   **This matters:** if `container_kvm_t` *is* enforcing, it is a second,
   independent gate on opening `/dev/nvidia*` that the device cgroup work will
   not address, and it will need a policy module of its own.
@@ -277,9 +722,29 @@ question in a way it is not under Docker:
 
 ## 4. Verdict and what to configure
 
-**NOT easy. Explicit device access is required.** The nodes are not reachable by
-default, and the reason is the device cgroup Kata builds for the sandbox, not
-file permissions and not namespaces.
+**MEASURED VERDICT: on cgroup v2, the nodes are reachable today with no
+configuration at all — and that is a bug, not a feature, so build as if it were
+not true.**
+
+The pre-measurement verdict read "NOT easy, explicit device access is required".
+That is still the right thing to *engineer against*, for exactly one reason: the
+only thing standing between here and there is a missing `Devices` assignment in
+a dependency (§1.6), and Kata's code plainly intends the restriction. A project
+that ships on the current behaviour ships on a bug that its upstream will fix.
+
+Concretely:
+
+| | cgroup v2 (measured) | cgroup v1 (from source, UNVERIFIED) |
+|---|---|---|
+| is a device policy installed on the sandbox cgroup? | **no** | yes |
+| can the VMM open `/dev/nvidia*` unconfigured? | **yes** | no |
+| does `sandbox_cgroup_only` change it? | **no** | it changes which cgroup the *threads* land in; see §1.4.3 |
+| is route (a) needed? | not to work today; **yes** to be correct and to survive the fix | **yes** |
+| would route (c) (`sandboxDevices()`) help? | **no** — the list it appends to is discarded | yes |
+
+So the ordering below is unchanged and route (a) is still the recommendation;
+what changed is that Phase 1 and Phase 2 of the build plan are **unblocked
+right now** on a v2 host and do not have to wait for route (a) to be built.
 
 Three ways to grant it, in order of preference:
 
@@ -328,6 +793,11 @@ Settle with `crictl inspectp` plus the cgroup dump from §1.4.
 
 ### (b) `sandbox_cgroup_only`
 
+> **MEASURED:** on cgroup v2 this knob does **not** affect device access — both
+> values put QEMU in the same (unrestricted) sandbox cgroup, §1.4.3. Pick it for
+> the cgroup-leak reason Kata's own NVIDIA profile gives (`true`), not for
+> device reasons.
+
 Set it deliberately rather than by default, once §1.4's experiment says which
 value puts the QEMU main thread somewhere the nodes are reachable. Kata's own
 NVIDIA profile uses `true`; if the measurement says `false` works only because
@@ -335,6 +805,11 @@ the overhead cgroup is unconstrained, that is a fragile reason to pick it and
 route (a) should be used instead.
 
 ### (c) Patch `sandboxDevices()`
+
+> **MEASURED CAVEAT:** on cgroup v2 this route is inert. `sandboxDevices()`
+> appends to the `[]LinuxDeviceCgroup` that `v2.ToResources()` discards (§1.6),
+> so the patch would change nothing observable and would be very hard to debug.
+> Fix `ToResources()` first, or send both together.
 
 Add the NVIDIA nodes to the hardcoded hypervisor-device list in
 `src/runtime/pkg/resourcecontrol/cgroups.go`, next to `/dev/kvm` and
@@ -347,7 +822,7 @@ opening move.
 
 | knob | file | default | why we touch it |
 |---|---|---|---|
-| `sandbox_cgroup_only` | `configuration-qemu.toml.in` | `false` (NVIDIA profile: `true`) | decides which cgroup's device policy applies to the QEMU main thread |
+| `sandbox_cgroup_only` | `configuration-qemu.toml.in` | `false` (NVIDIA profile: `true`; runtime-rs: `true`) | **MEASURED: no effect on device access on cgroup v2** — both values put QEMU in the same sandbox cgroup (§1.4.3), and that cgroup has no device policy (§1.6). Set it `true` for the cgroup-leak reason Kata's NVIDIA profile gives |
 | `rootless` | same | `false` | **leave false.** Rootless is documented incompatible with VFIO for permission reasons and would add a DAC problem we do not currently have |
 | `disable_selinux` | same | `false` | if the host ships `container-selinux`, expect a second gate; measure before assuming |
 | `seccompsandbox` | same | off | leave off; QEMU's `-sandbox` would interfere with the isolate spawn path |
@@ -356,6 +831,15 @@ opening move.
 ---
 
 ## Upstream reference
+
+Measurements in §1.4, §1.6 and §2 were made on 2026-08-27 against released
+binaries: `kata-go-static-4.1.0-amd64` and `kata-static-4.1.0-amd64`
+(`kata-runtime 4.1.0`, commit `ddcb1ad8`), with `containerd/cgroups` v1.1.0 as
+pinned by `src/runtime/go.mod`. Raw output — the cgroup dumps, the
+`BPF_PROG_QUERY` results, the `open()` transcripts, the OCI spec dump, the
+counterfactual, and the real `nvidia-ctk` CDI spec the splitter was tested on —
+was retained outside this repository; `scripts/check-vmm-device-access.sh`
+regenerates all of it.
 
 All Kata file:line citations in this document are against
 `github.com/kata-containers/kata-containers` at commit **`f62ecce`**
@@ -368,12 +852,40 @@ releases — check the commit before trusting a line number.
 
 ## Experiments that would settle this document
 
-1. **The device cgroup dump**, both `sandbox_cgroup_only` values, both cgroup
-   versions — §1.4. This is the one that decides whether route (a) is needed at
-   all.
-2. **Which OCI spec feeds `createResourceController`** — §4(a).
+1. ~~**The device cgroup dump**, both `sandbox_cgroup_only` values~~ — **DONE**,
+   §1.4, on two hosts, two containerd versions, both Kata runtimes, real GPU.
+   Still open for **cgroup v1**, which needs a host that boots
+   `systemd.unified_cgroup_hierarchy=0`; from source the answer should invert
+   (§1.6).
+2. ~~**Which OCI spec feeds `createResourceController`**~~ — **DONE**, §1.4.4.
+   It is the OCI spec containerd builds for the container the shim is handed;
+   its `linux.resources.devices` is a deny-all plus the curated safe set, and
+   `linux.cgroupsPath` is the parent Kata renames to `kata_<id>`.
 3. **`container_kvm_t` presence and enforcement** on the target distro — §3.
-4. **PID namespace** of the VMM vs PID 1 — §2.
+   **Partly done**: negative on two Ubuntu hosts (label `unconfined`, no
+   `container-selinux`). Still open on RHEL/OpenShift.
+4. ~~**PID namespace** of the VMM vs PID 1~~ — **DONE**, §2: shared. The same
+   dump also corrected the mount-namespace claim.
 5. **Which nvkvm isolate rung `auto` selects under Kata** — read
    `isolate-mode-active` over QMP. Expected `namespace` (better than Docker),
-   but nvkvm's own docs say never to infer this.
+   but nvkvm's own docs say never to infer this. **Not attempted** — it needs an
+   nvkvm-patched QEMU, which is Phase 1 of the build plan.
+
+New experiments this round created:
+
+6. **Does the `ToResources()` gap still exist in whatever `containerd/cgroups`
+   version Kata ships next?** This finding has a shelf life measured in
+   releases. `scripts/check-vmm-device-access.sh` is the regression test; run it
+   on every Kata bump before assuming the gate is still open.
+7. **Does a kubelet-managed pod cgroup change the answer?** Everything here was
+   measured under `ctr`, so the parent was `/default/…` and carried no device
+   program of its own. A `/kubepods/…` parent that did would change the
+   effective count without Kata doing anything.
+
+### How to reproduce
+
+```bash
+sudo ./scripts/check-vmm-device-access.sh --self-test        # proves the harness; no Kata, no GPU
+sudo ./scripts/check-vmm-device-access.sh --device /dev/mem  # the real thing, on a GPU host
+sudo ./scripts/check-vmm-device-access.sh --synthesise-nodes --device /dev/mem   # on a GPU-less host
+```

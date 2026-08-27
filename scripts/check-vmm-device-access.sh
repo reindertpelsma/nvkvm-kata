@@ -153,6 +153,52 @@ SHEOF
   PROBE_CMD=("$PROBE")
 fi
 
+# ---------------------------------------------- cgroup v2 device-filter query
+# bpftool is not dependable across kernel/bpftool skew: on some pairs
+# `bpftool cgroup show` bails with ENXIO on an attach type the kernel does not
+# know and reports nothing for a cgroup that does have a device filter. Ask
+# BPF_PROG_QUERY directly instead -- the same call bpftool makes, minus the skew.
+CGDEVQ=$OUTDIR/cgroup-device-query
+if command -v python3 >/dev/null 2>&1; then
+  cat > "$CGDEVQ" <<'CGQEOF'
+#!/usr/bin/env python3
+import ctypes, os, struct, sys
+BPF_PROG_QUERY, BPF_CGROUP_DEVICE, BPF_F_QUERY_EFFECTIVE = 16, 6, 1
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+libc.syscall.restype = ctypes.c_long
+
+def query(path, effective):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        ids = (ctypes.c_uint32 * 64)()
+        attr = struct.pack("=IIIIQII", fd, BPF_CGROUP_DEVICE,
+                           BPF_F_QUERY_EFFECTIVE if effective else 0, 0,
+                           ctypes.addressof(ids), 64, 0)
+        buf = ctypes.create_string_buffer(attr, len(attr))
+        if libc.syscall(321, BPF_PROG_QUERY, ctypes.byref(buf), len(attr)) != 0:
+            return None, os.strerror(ctypes.get_errno()), []
+        cnt = struct.unpack_from("=I", buf.raw, 24)[0]
+        return cnt, None, [ids[i] for i in range(min(cnt, 64))]
+    finally:
+        os.close(fd)
+
+rc = 0
+for path in sys.argv[1:]:
+    eff, err, eids = query(path, True)
+    att, _, aids = query(path, False)
+    if eff is None:
+        print("  %-56s QUERY-FAILED (%s)" % (path, err)); rc = 2; continue
+    print("  %-56s effective=%d attached=%d ids=%s -> %s"
+          % (path, eff, att, aids or "-",
+             "device-UNRESTRICTED (nothing gates open() here)" if eff == 0
+             else "device-RESTRICTED by %d effective program(s)" % eff))
+sys.exit(rc)
+CGQEOF
+  chmod +x "$CGDEVQ"
+else
+  CGDEVQ=""
+fi
+
 # ------------------------------------------------------- cgroup version + paths
 CG_MOUNT=/sys/fs/cgroup
 cgroup_version() {
@@ -209,6 +255,21 @@ dump_device_policy() {
     echo "      created with an empty device set inherits the parent's list."
   else
     sub "cgroup v2 BPF_CGROUP_DEVICE programs, walking up to the root"
+    if [ -n "$CGDEVQ" ]; then
+      echo "BPF_PROG_QUERY(BPF_CGROUP_DEVICE), asked of the kernel directly:"
+      local q="$cgpath"
+      while :; do
+        "$CGDEVQ" "$(cgroup_dir_for "$q")"
+        [ "$q" = "/" ] && break
+        q=$(dirname "$q"); [ "$q" = "." ] && q=/
+      done
+      echo
+      echo "  'effective' counts this cgroup's own programs PLUS every ancestor's,"
+      echo "  which is exactly the set that gates open() for a task in it."
+      echo "  effective=0 at the leaf therefore means device-UNRESTRICTED, and no"
+      echo "  further reading of any program is needed."
+      echo
+    fi
     if ! command -v bpftool >/dev/null 2>&1; then
       echo "!! bpftool not installed -- install linux-tools / bpftool to dump the"
       echo "   attached device filter. The open() results below still stand."
@@ -217,14 +278,18 @@ dump_device_policy() {
       while :; do
         local d; d=$(cgroup_dir_for "$p")
         local out; out=$(bpftool cgroup show "$d" 2>&1)
-        if echo "$out" | grep -q device; then
+        # match the AttachType column exactly. Matching a bare "device" also
+        # matches bpftool's own "No such device or address" error text.
+        if echo "$out" | grep -q "cgroup_device"; then
           echo "[$p]"; echo "$out" | sed 's/^/    /'
           # dump every attached device program
-          echo "$out" | awk '/device/{print $1}' | while read -r id; do
+          echo "$out" | awk '$2=="cgroup_device"{print $1}' | while read -r id; do
             [ -n "$id" ] || continue
             echo "    --- bpftool prog dump xlated id $id ---"
             bpftool prog dump xlated id "$id" 2>&1 | sed 's/^/    /'
           done
+        elif echo "$out" | grep -qi "^Error:"; then
+          echo "[$p]  bpftool could not query this cgroup: $(echo "$out" | head -1)"
         else
           echo "[$p]  no BPF_CGROUP_DEVICE program attached"
         fi
@@ -328,7 +393,21 @@ if [ "$SELF_TEST" -eq 1 ]; then
       || { echo "   -> FAIL: denial not observed"; rc=1; }
     rmdir "$tcg" 2>/dev/null
   fi
-  sub "4. device policy dumper runs against this shell's own cgroup"
+  sub "4. the direct BPF_PROG_QUERY agrees with a known-restricted cgroup"
+  if [ -n "$CGDEVQ" ] && command -v systemd-run >/dev/null 2>&1 && [ "$CGV" = v2 ]; then
+    out=$(systemd-run --scope --quiet -p DevicePolicy=strict -p DeviceAllow='/dev/null rwm' \
+          bash -c 'p=$(awk -F: "\$1==0{print \$3}" /proc/self/cgroup); "$1" "/sys/fs/cgroup$p"' _ "$CGDEVQ" 2>&1)
+    echo "$out"
+    echo "$out" | grep -q "device-RESTRICTED" \
+      && echo "   -> OK: the direct query sees a filter that is really there" \
+      || { echo "   -> FAIL: direct query missed a known filter"; rc=1; }
+    echo "   and the caller's own cgroup, for contrast:"
+    "$CGDEVQ" "$(cgroup_dir_for "$(pid_cgroup_path $$)")"
+  else
+    echo "   -> SKIPPED (needs python3 + systemd-run on cgroup v2)"
+  fi
+
+  sub "5. device policy dumper runs against this shell's own cgroup"
   dump_device_policy "$(pid_cgroup_path $$)" | head -40
   hdr "SELF TEST $([ $rc -eq 0 ] && echo PASSED || echo FAILED)"
   exit $rc
@@ -383,10 +462,20 @@ CTR_CID=""
 teardown_sandbox() {
   [ -z "$CTR_CID" ] && return
   [ "$KEEP" -eq 1 ] && { echo "--keep: leaving container $CTR_CID running"; return; }
-  ctr task kill -s SIGKILL "$CTR_CID" >/dev/null 2>&1
-  sleep 1
+  # -a is load-bearing: without it the sandbox VM survives `ctr task rm` and
+  # the next run measures a stale hypervisor.
+  ctr task kill -a -s SIGKILL "$CTR_CID" >/dev/null 2>&1
+  sleep 3
   ctr task rm -f "$CTR_CID" >/dev/null 2>&1
   ctr container rm "$CTR_CID" >/dev/null 2>&1
+  local i
+  for i in $(seq 1 15); do
+    find_hypervisor_pid "$CTR_CID" >/dev/null || break
+    sleep 1
+  done
+  if find_hypervisor_pid "$CTR_CID" >/dev/null; then
+    warn "hypervisor for $CTR_CID is STILL running after teardown; later runs may be measuring it"
+  fi
   CTR_CID=""
 }
 trap 'teardown_sandbox; cleanup_synth' EXIT
@@ -402,8 +491,14 @@ launch_sandbox() {
   fi
   local i pid=""
   for i in $(seq 1 30); do
+    # `ctr task ls` reports the hypervisor pid for a Kata task; cross-check it
+    # against /proc so a wrong answer cannot pass silently.
+    pid=$(ctr task ls 2>/dev/null | awk -v c="$CTR_CID" '$1==c{print $2}')
+    if [ -n "$pid" ] && [ -r "/proc/$pid/comm" ]; then
+      case "$(cat /proc/$pid/comm)" in qemu*|cloud-hyperviso*|firecracker) break ;; esac
+    fi
     pid=$(find_hypervisor_pid "$CTR_CID") && [ -n "$pid" ] && break
-    sleep 1
+    pid=""; sleep 1
   done
   [ -n "$pid" ] || { echo "!! no hypervisor process found for $CTR_CID"; return 1; }
   echo "$pid"
