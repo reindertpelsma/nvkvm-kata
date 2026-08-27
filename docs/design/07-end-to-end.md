@@ -466,7 +466,10 @@ cpuset cpu io memory hugetlb pids rdma
 ```
 
 No `devices`. There is nothing for the library to find, and it does not fall
-back to attaching a BPF program.
+back to attaching a BPF program. Full transcript:
+[`evidence/07/guest-shell.log`](evidence/07/guest-shell.log) — which also shows
+`/proc/modules` = `nvkvm_guest ... Live`, the guest's `/dev/nvidia*`, and the
+`/var/run/cdi/nvkvm.yaml` the `modprobe.d` `install` directive wrote.
 
 **This is the same bug as [01 §1.6](01-vmm-confinement.md), one layer down and
 in a different language.** On the host, `containerd/cgroups` `v2.ToResources()`
