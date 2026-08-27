@@ -1,0 +1,34 @@
+Warning: Permanently added '[70.30.252.209]:23066' (ED25519) to the list of known hosts.
+=== docker compose up (runtime: nvkvm-kata) ===
+cuda-1  | devices: 1
+cuda-1  | device 0: NVIDIA GeForce RTX 3090
+cuda-1  | elements: 1048576  mismatches: 0  sample: c[7]=21.0 (want 21.0)
+cuda-1  | VECADD OK
+[Kcuda-1 exited with code 0
+Aborting on container exit...
+ Container examples-cuda-1  Stopping
+ Container examples-cuda-1  Stopped
+=== docker compose up: control service, host default runtime ===
+control-1  | no nvidia nodes (expected)
+[Kcontrol-1 exited with code 0
+Aborting on container exit...
+ Container examples-control-1  Stopping
+ Container examples-control-1  Stopped
+=== docker run --runtime nvkvm-kata ===
+devices: 1
+device 0: NVIDIA GeForce RTX 3090
+elements: 1048576  mismatches: 0  sample: c[7]=21.0 (want 21.0)
+VECADD OK
+=== ctr with --runtime-config-path ===
+devices: 1
+device 0: NVIDIA GeForce RTX 3090
+elements: 1048576  mismatches: 0  sample: c[7]=21.0 (want 21.0)
+VECADD OK
+=== ctr WITHOUT the flag: loud error, not a silent stock boot ===
+ctr: failed to create shim task: invalid KATA_CONF_FILE "/etc/kata-containers/configuration-nvkvm.toml": only shipped Kata configuration files are accepted: unknown
+=== stock kata still works ===
+6.18.35
+=== host keeps the card ===
+GPU 0: NVIDIA GeForce RTX 3090 (UUID: GPU-6cef4973-2bd4-cc9b-304f-c85a24a6840f)
+nvidia-bound PCI devices: 1
+DONE

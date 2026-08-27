@@ -595,6 +595,29 @@ profile without being run again.
 
 ## 10. Reproducing it
 
+> **There is now a script for all of this**, and a document that keeps the
+> manual path first-class: [`docs/install.md`](../install.md) and
+> `scripts/nvkvm-kata-install.sh`. Its nine stages are the nine numbered
+> sections of that document, which are the steps below plus the two things this
+> section leaves to the reader: registering a **second** runtime so the choice
+> is per container, and reverting it. Two corrections to what follows, both
+> MEASURED on 2026-08-27/28 and both recorded in
+> [`evidence/08/`](evidence/08/):
+>
+> 1. **`KATA_CONF_FILE` can no longer select a second configuration.** Kata's
+>    `isShippedKataConfigPath` (`containerd-shim-v2/create.go:325`) accepts only
+>    the two hardcoded default paths. The `ConfigPath` *runtime option* — the
+>    one containerd's CRI plugin and Docker's `daemon.json` pass — is read first
+>    and is not validated, and it is what works.
+> 2. **The `NVKVM_EXTRA_ARGS` systemd drop-in on `containerd.service` is not
+>    needed**, and the installer does not create one. It is global and awkward
+>    to revert; the shim already defaults to the device, and an override belongs
+>    in `/etc/nvkvm-kata/shim.env`, which only the shim reads.
+>
+> The steps below are still the honest bring-up sequence and are left as they
+> were run.
+
+
 Assumes a host with `/dev/kvm`, an NVIDIA driver, docker and containerd. Check
 `/dev/kvm` and `systemd-detect-virt` **first**; most GPU rentals are containers
 and cannot provide it, and CPU `vmx`/`svm` flags prove nothing because a

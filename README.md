@@ -12,6 +12,46 @@ design docs claim.
 Upstream changes required for any of it: **one line** — widening
 `build-kernel.sh`'s `-g` vendor validation to accept a third value.
 
+## Install it
+
+```bash
+sudo scripts/nvkvm-kata-install.sh --install-kata --install-deps
+```
+
+One script, source to installed. Afterwards the choice is **per container** —
+stock Kata and `runc` are untouched and still work:
+
+```yaml
+services:
+  cuda:
+    image: ubuntu:24.04
+    runtime: nvkvm-kata
+    environment:
+      VISIBLE_CDI_DEVICES: nvidia.com/gpu=0
+      LD_LIBRARY_PATH: /usr/local/nvidia/lib
+    volumes:
+      - /opt/nvkvm-kata/nvidia/lib:/usr/local/nvidia/lib:ro
+```
+
+The script ends by **running the CUDA proof** on the runtime it just registered
+and fails loudly if it does not compute the right answer; installed-but-broken
+is not reported as success. `scripts/nvkvm-kata-uninstall.sh` puts the host
+back, from a manifest written during the install.
+
+Selection is a **second Kata `configuration.toml` plus a `ConfigPath` runtime
+option** — a separate containerd runtime type `io.containerd.nvkvm-kata.v2`
+registered in Docker's `daemon.json`, with the stock Kata configuration, the
+stock shim and `runc` untouched. Note that `KATA_CONF_FILE`, the mechanism
+kata-deploy uses and the one you will reach for first, **no longer works** for a
+second configuration on Kata 4.1.0 — see
+[install §5d](docs/install.md#5d-the-containerd-shim-wrapper--half-one-of-the-selection-mechanism).
+
+**The manual path stays first-class.** [`docs/install.md`](docs/install.md) is
+the recipe by hand, in nine numbered sections; the script's nine stages *are*
+those sections and name them in their own output. If the two ever disagree, the
+document is right. Raw output from the run that proved it:
+[`docs/design/evidence/08/`](docs/design/evidence/08/).
+
 **The two findings, because they are the important part:**
 
 1. **The container's device cgroup is not enforced inside the guest** on
@@ -109,6 +149,7 @@ construction — removing nvkvm's usual version-matching machinery entirely.
 | [04 — The guest kernel](docs/design/04-guest-kernel.md) | how `nvkvm-guest.ko` gets into Kata's guest |
 | [05 — Caveats and scope](docs/design/05-caveats-and-scope.md) | boot time, QEMU-only, and the multi-tenancy problem |
 | [07 — End to end](docs/design/07-end-to-end.md) | **the run.** What worked, how to reproduce it, and the two findings that contradict 03 |
+| [Installing](docs/install.md) | **the installer, and the manual path it is a convenience over.** Nine numbered steps, the per-container selection mechanism, uninstall, and what it does *not* do |
 
 ## Evidence standard
 

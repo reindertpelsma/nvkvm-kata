@@ -1,0 +1,59 @@
+# nvkvm-kata: selecting the runtime per container.
+#
+#   docker compose -f examples/docker-compose.yml up --abort-on-container-exit cuda
+#
+# USE `up`, NOT `run`.  `docker compose run` attaches the container's stdin, and
+# stdin-attach is broken for Kata on Docker 28.1.1 -- MEASURED, and measured
+# with STOCK Kata as the control, so it is nothing to do with nvkvm:
+#
+#   docker run --rm    --runtime kata-stock ubuntu:24.04 uname -r  -> 6.18.35
+#   docker run --rm -i --runtime kata-stock ubuntu:24.04 uname -r  -> ttrpc: closed
+#   docker run --rm    --runtime nvkvm-kata ubuntu:24.04 uname -r  -> 6.18.35-nvkvm
+#   docker run --rm -i --runtime nvkvm-kata ubuntu:24.04 uname -r  -> ttrpc: closed
+#   docker run --rm -i                      ubuntu:24.04 uname -r  -> 6.8.0-59-generic (runc, fine)
+#
+# See docs/design/evidence/08/stdin-attach-control.log.  `up`, `up -d` and
+# plain `docker run` are unaffected.
+#
+# The only line that selects nvkvm is `runtime:`.  Everything else in this file
+# is ordinary compose.  Change it to `runtime: runc` (or delete it) and the same
+# service runs on the host's default runtime with no GPU -- which is the point:
+# stock Kata and runc are untouched and still work.
+services:
+
+  # The proof.  A CUDA vector-add on the driver API with embedded PTX, so it
+  # needs no CUDA toolkit in the image.  Prints VECADD OK.
+  cuda:
+    image: ubuntu:24.04
+    runtime: nvkvm-kata
+    command: /usr/local/nvidia/bin/vecadd
+    environment:
+      # Which CDI device the guest should materialise inside the container.
+      # NOTE: on cgroup v2 this decides which device NODES are created for you.
+      # It is NOT an access boundary -- docs/design/07-end-to-end.md 8.1.
+      VISIBLE_CDI_DEVICES: nvidia.com/gpu=0
+      # Kata drops CDI's hooks (kata#11169), so nothing runs ldconfig in here.
+      LD_LIBRARY_PATH: /usr/local/nvidia/lib
+    volumes:
+      # The HOST driver's own userspace, staged by the installer.  It must match
+      # the host driver exactly -- the host driver services every forwarded ioctl.
+      - /opt/nvkvm-kata/nvidia/lib:/usr/local/nvidia/lib:ro
+      - /opt/nvkvm-kata/nvidia/bin:/usr/local/nvidia/bin:ro
+
+  # Same thing with nvidia-smi, for a look at the card from inside the VM.
+  smi:
+    image: ubuntu:24.04
+    runtime: nvkvm-kata
+    command: /usr/local/nvidia/bin/nvidia-smi
+    environment:
+      VISIBLE_CDI_DEVICES: nvidia.com/gpu=0
+      LD_LIBRARY_PATH: /usr/local/nvidia/lib
+    volumes:
+      - /opt/nvkvm-kata/nvidia/lib:/usr/local/nvidia/lib:ro
+      - /opt/nvkvm-kata/nvidia/bin:/usr/local/nvidia/bin:ro
+
+  # Control: the same image on the host's default runtime.  No GPU, no VM.
+  # Useful when something fails and you need to know which layer broke.
+  control:
+    image: ubuntu:24.04
+    command: /bin/sh -c 'uname -r; ls /dev/nvidia* 2>&1 || echo "no nvidia nodes (expected)"'

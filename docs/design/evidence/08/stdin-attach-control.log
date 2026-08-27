@@ -1,0 +1,29 @@
+Warning: Permanently added '[70.30.252.209]:23066' (ED25519) to the list of known hosts.
+=== A nvkvm, no stdin ===
+6.18.35-nvkvm
+RC=0
+=== B nvkvm, -i ===
+docker: Error response from daemon: ttrpc: closed: unknown
+
+Run 'docker run --help' for more information
+RC=0
+=== C stock kata, no stdin ===
+6.18.35
+RC=0
+=== D stock kata, -i ===
+docker: Error response from daemon: ttrpc: closed: unknown
+
+Run 'docker run --help' for more information
+RC=0
+=== E runc, -i ===
+6.8.0-59-generic
+RC=0
+=== F compose up ===
+cuda-1  | elements: 1048576  mismatches: 0  sample: c[7]=21.0 (want 21.0)
+cuda-1  | VECADD OK
+[Kcuda-1 exited with code 0
+Aborting on container exit...
+ Container examples-cuda-1  Stopping
+ Container examples-cuda-1  Stopped
+RC=0
+DONE
