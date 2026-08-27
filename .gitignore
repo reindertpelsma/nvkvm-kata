@@ -1,3 +1,4 @@
 # reference clones live outside this repo, at ../nvkvm-kata-refs
 *.pyc
 __pycache__/
+*.swp
