@@ -255,6 +255,7 @@ traps and the nvkvm conflict are there.
 | Bind or mknod in the guest? | rustjail has `bind_dev`, but only on the user-namespace path and with no `EPERM` fallback (runc has both). mknod works today; bind is better and is a ~6-line change. | [03](03-guest-side-devices.md) |
 | How does `nvkvm-guest.ko` get into the guest? | Mirror `build-kernel.sh -g nvidia`, which already builds an out-of-tree NVIDIA module against Kata's kernel and `modules_install`s it. Ship via `KERNEL_MODULES_DIR`, load via `kernel_modules = [...]`. **Kata's stock kernel has no `CONFIG_MODULES`** and no `CONFIG_DRM`. | [04](04-guest-kernel.md) |
 | What confines the VMM *process*, if it is exploited? | **Almost nothing, and by design.** Kata jails Firecracker (`fc.go`, 46 jailer/seccomp/chroot matches) and enables Cloud Hypervisor's seccomp by default, but the QEMU driver has 3 matches, all plumbing for QEMU's `-sandbox`, which ships empty. A QEMU RCE here is a full host compromise today. Mitigation that needs no patch: set `seccompsandbox`. | [01 §3](01-vmm-confinement.md), [05 §2a](05-caveats-and-scope.md) |
+| Does the whole thing work? | **MEASURED: yes.** CUDA in a container in a Kata VM through nvkvm, 2026-08-27, RTX 4070 Ti SUPER; two sandboxes sharing one GPU; ~3.8 s sandbox start. One upstream line changed. But the container's device cgroup is **not enforced in the guest**, so the boundary [03](03-guest-side-devices.md) relies on is absent. | [07](07-end-to-end.md) |
 | What are the deal-breakers? | Boot time (rules out FaaS), QEMU-only (Firecracker and Cloud Hypervisor cannot work) — which also pins us to the least-confined VMM — and nvkvm's own statement that it is not a hardened multi-tenant boundary, which is Kata's whole audience. | [05](05-caveats-and-scope.md) |
 
 ---
@@ -362,6 +363,16 @@ Still no Kata involved; de-risk the packaging.
    virtio-fs — the one unverified risk in [02](02-libraries-via-cdi.md).
 
 **Exit criterion:** `nvidia-smi` inside an OCI container inside a Kata VM.
+
+**MET, 2026-08-27 — and so is phase 1, and so is rung 5.** See
+[07 — End to end](07-end-to-end.md). `nvidia-smi` and a CUDA vector-add both ran
+in a container in a Kata VM on an RTX 4070 Ti SUPER, and two Kata sandboxes
+shared that GPU concurrently while the host kept it bound to the `nvidia`
+driver. Steps 4-9 above are all done; step 7 (`nvidia-ctk cdi generate` in the
+guest) was sidestepped rather than answered — the guest spec is written directly
+— and remains UNVERIFIED. **Two findings in [07](07-end-to-end.md) contradict
+things this document and [03](03-guest-side-devices.md) assert; read §8 there
+before quoting either.**
 
 ### Phase 3 — packaging (2–4 weeks)
 

@@ -1,0 +1,19 @@
+### device-cgroup enforcement: identical ctr spec, two runtimes (2026-08-27T20:24:32+00:00) ###
+--- runtime io.containerd.kata.v2 ---
+  /proc/self/cgroup: 0::/
+  CapEff:	00000000a80425fb
+  mknod c 195:255 -> ok
+  mknod c 1:1     -> ok
+  open  c 195:255 -> cat: /tmp/d/ctl: Invalid argument
+
+  open  c 1:1     -> cat: /tmp/d/mem: No such device or address
+
+--- runtime io.containerd.runc.v2 ---
+  /proc/self/cgroup: 0::/default/ev-io.containerd.runc.v2-85605
+  CapEff:	00000000a80425fb
+  mknod c 195:255 -> ok
+  mknod c 1:1     -> ok
+  open  c 195:255 -> cat: /tmp/d/ctl: Operation not permitted
+
+  open  c 1:1     -> cat: /tmp/d/mem: Operation not permitted
+

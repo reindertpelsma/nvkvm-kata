@@ -10,6 +10,20 @@ exists.
 
 ---
 
+> **CORRECTION, 2026-08-27 — the central claim of this document was measured
+> and does not hold on the configuration that was run.** This document says the
+> container's device cgroup is "the one that decides, and the one that fails
+> silently". In an end-to-end run
+> ([07 §8.1](07-end-to-end.md#81-finding-the-containers-device-cgroup-is-not-enforced-in-the-guest))
+> it decided nothing: with the *identical* OCI spec, `runc` returned EPERM for a
+> self-`mknod`'d `c 195:255` and Kata did not, and `nvidia-smi` worked in a
+> container that had been given no GPU. Everything below about *where the rule
+> comes from* (a CDI `deviceNodes` entry, applied in the guest) was confirmed,
+> and the guest-generated spec demonstrably fixed the UVM major (host 236 vs
+> guest 243). What was not confirmed is that the rule is ever **enforced**. Read
+> [07 §8.1](07-end-to-end.md#81-finding-the-containers-device-cgroup-is-not-enforced-in-the-guest)
+> before quoting the paragraph below.
+
 ## The gate is the container's device cgroup, inside the guest
 
 `/dev/nvidiactl` and `/dev/nvidia*` inside the Kata VM are created by

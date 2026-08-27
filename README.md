@@ -1,11 +1,30 @@
 # nvkvm-kata
 
-**Status: DESIGN, plus one measured result.** This repository is a design
-document and a skeleton — no build, no packaging. Two scripts are now real and
-self-testing (`check-vmm-device-access.sh`, `split-cdi-spec.sh`); the rest is
-still a clearly-marked stub that refuses to run.
+**Status: IT RUNS.** On 2026-08-27 a CUDA vector-add executed inside an OCI
+container, inside a Kata Containers VM, on an NVIDIA RTX 4070 Ti SUPER, with
+every ioctl forwarded by nvkvm to the host driver — and the host keeping the
+card the whole time. Two Kata sandboxes then shared that one GPU concurrently,
+which is the thing Kata's existing VFIO passthrough path cannot do at all.
+**Read [07 — End to end](docs/design/07-end-to-end.md)**: it has the commands
+that reproduce it, and two measured findings that change what the earlier
+design docs claim.
 
-**The gating unknown has been measured.** See
+Upstream changes required for any of it: **one line** — widening
+`build-kernel.sh`'s `-g` vendor validation to accept a third value.
+
+**The two findings, because they are the important part:**
+
+1. **The container's device cgroup is not enforced inside the guest** on
+   cgroup v2. Measured with the *identical* OCI spec under two runtimes: `runc`
+   returns EPERM, Kata does not. [03](docs/design/03-guest-side-devices.md)
+   calls that cgroup "the one that decides"; here it decides nothing, and
+   `nvidia-smi` works in a container that was never given a GPU.
+2. **Kata's shipped generic rootfs cannot load a kernel module.**
+   `kernel_modules = [...]` execs `/sbin/modprobe`, and `kata-containers.img`
+   4.1.0 ships no modprobe, no kmod and no busybox. The shipped mechanism
+   cannot run on the shipped image.
+
+**The earlier gating unknown was also measured.** See
 [01 §1.4](docs/design/01-vmm-confinement.md) — on cgroup v2 the Kata hypervisor
 can open `/dev/nvidiactl` and every other NVIDIA node, unconfigured, for both
 `sandbox_cgroup_only` values, on both Kata runtimes, verified against a real GPU
@@ -43,7 +62,8 @@ part. **That was wrong, and the inversion is the main result.**
 | confinement of the **VMM process itself** | **MEASURED, and it is the weak point.** Kata jails Firecracker and enables Cloud Hypervisor's seccomp by default; its QEMU driver gets neither, and ships with `seccompsandbox = ""`. Since nvkvm is QEMU-only, this project is pinned to the least-confined VMM — [01 §3](docs/design/01-vmm-confinement.md), [05 §2a](docs/design/05-caveats-and-scope.md) |
 | host NVIDIA **libraries** into the container | works via CDI mounts → virtio-fs; CDI **hooks** are dropped by Kata's shim — [02](docs/design/02-libraries-via-cdi.md) |
 | **guest-resident device nodes** into the container | expected to be novel; **it is not.** kata-agent already applies CDI specs found inside the guest — [03](docs/design/03-guest-side-devices.md) |
-| shipping an out-of-tree module in Kata's guest kernel | strong precedent (`build-kernel.sh -g nvidia` already builds one) — [04](docs/design/04-guest-kernel.md) |
+| shipping an out-of-tree module in Kata's guest kernel | **DONE AND RUN.** `-g nvkvm`, module built out-of-tree, `depmod`'d, loaded via `kernel_modules` — [04](docs/design/04-guest-kernel.md), [07](docs/design/07-end-to-end.md) |
+| the whole thing, end to end | **DONE AND RUN.** `nvidia-smi` and a CUDA vector-add in a container in a Kata VM; two sandboxes sharing one GPU — [07](docs/design/07-end-to-end.md) |
 
 And one thing the research turned around completely: the project was pitched
 partly on **"the VMM gets confined by the platform"**. It largely does not — for
@@ -81,6 +101,7 @@ construction — removing nvkvm's usual version-matching machinery entirely.
 | [03 — Guest-side device nodes](docs/design/03-guest-side-devices.md) | the novel part; the smallest viable change and where it lands |
 | [04 — The guest kernel](docs/design/04-guest-kernel.md) | how `nvkvm-guest.ko` gets into Kata's guest |
 | [05 — Caveats and scope](docs/design/05-caveats-and-scope.md) | boot time, QEMU-only, and the multi-tenancy problem |
+| [07 — End to end](docs/design/07-end-to-end.md) | **the run.** What worked, how to reproduce it, and the two findings that contradict 03 |
 
 ## Evidence standard
 

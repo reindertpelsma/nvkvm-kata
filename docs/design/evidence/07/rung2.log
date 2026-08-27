@@ -1,0 +1,43 @@
+===== rung2+ 2026-08-27T20:13:34+00:00 =====
+guest kernel release: 6.18.35-nvkvm
+
+### 1. prepare a private copy of the shipped rootfs image ###
+-rw-r--r-- 1 root root 268435456 Aug 27 20:13 /opt/kata/share/kata-containers/kata-nvkvm.image
+
+### 2. install kmod + the guest CDI generator (stock rootfs has NO modprobe) ###
+debconf: delaying package configuration, since apt-utils is not installed
+harvested kmod: 174328 bytes, libs: libc.so.6 libcrypto.so.3 liblzma.so.5 libzstd.so.1 
+  /mnt/nvkvm-prep/usr/sbin/modprobe -> ../bin/kmod  (resolves: /mnt/nvkvm-prep/usr/bin/kmod)
+  installed /usr/local/bin/nvkvm-guest-cdi-gen + /etc/modprobe.d/nvkvm-guest.conf
+/dev/loop3p1    219M  129M   78M  63% /mnt/nvkvm-prep
+OK: /opt/kata/share/kata-containers/kata-nvkvm.image prepared
+
+### 3. inject nvkvm-guest.ko + depmod ###
+staged 320K for release 6.18.35-nvkvm
+
+=== injecting into disk image /opt/kata/share/kata-containers/kata-nvkvm.image ===
+/dev/loop3p1    219M  129M   78M  63% /mnt/nvkvm-rootfs
+  modules.dep: 1 entries; nvkvm line: extra/nvkvm-guest.ko:
+  /sbin/modprobe present: lrwxrwxrwx 1 root root 11 Aug 27 20:13 /mnt/nvkvm-rootfs/sbin/modprobe -> ../bin/kmod
+OK: /opt/kata/share/kata-containers/kata-nvkvm.image updated (original saved as /opt/kata/share/kata-containers/kata-nvkvm.image.orig)
+
+### 4. point kata at the nvkvm kernel + image, load the module, enable CDI env ###
+15:path = "/usr/local/bin/nvkvm-qemu-shim"
+16:kernel = "/root/gk/vmlinuz-6.18.35-nvkvm"
+17:image = "/opt/kata/share/kata-containers/kata-nvkvm.image"
+52:kernel_params = "cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1 agent.visible_cdi_devices=true agent.visible_cdi_devices=true"
+568:kernel_modules = ["nvkvm-guest"]
+
+### 5. containerd env: nvkvm QEMU + the virtio-nvgpu device ###
+
+### 6. RUNG 2: does the module load in the guest? ###
+uname: 6.18.35-nvkvm
+--- /dev/nvidia* ---
+ls: /dev/nvidia*: No such file or directory
+ls: /dev/dri: No such file or directory
+--- /proc/devices (195/nvidia) ---
+195 nvidia
+195 nvidiactl
+243 nvidia-uvm
+rung2 rc=0
+===== rung2 done 2026-08-27T20:13:53+00:00 =====

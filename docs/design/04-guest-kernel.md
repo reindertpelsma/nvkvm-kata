@@ -153,6 +153,21 @@ and a classic silent failure: `modprobe` will report the module as not found
 with no indication that the problem is a missing `modules.dep`. The rootfs
 assembly step must run `depmod -a -b <rootfs> <kernelrelease>` itself.
 
+> **REFINEMENT, 2026-08-27, after running it
+> ([07 §8.2-8.3](07-end-to-end.md#82-finding-there-is-no-modprobe-in-the-shipped-rootfs)).**
+> True of those two files — and **already solved upstream on the NVIDIA path**:
+> `tools/osbuilder/rootfs-builder/nvidia/nvidia_rootfs.sh:709-716` runs
+> `depmod -b` per kernel version and `:837-843` installs `kmod` plus applet
+> symlinks. So the recipe exists; it is just absent from the generic path. Two
+> things this section does *not* say, both measured:
+> **(a) the shipped `kata-containers.img` has no `modprobe`, no `kmod` and no
+> busybox at all**, so `kernel_modules = [...]` — the mechanism this document
+> recommends — cannot run on the shipped image; and
+> **(b) Ubuntu noble is usr-merged**, so a relative `../usr/bin/kmod` symlink
+> into `/sbin` dangles and produces a failure byte-identical to having no
+> modprobe. Upstream uses absolute targets for exactly that reason
+> (`nvidia_rootfs.sh:838-841`).
+
 ---
 
 ## Loading it

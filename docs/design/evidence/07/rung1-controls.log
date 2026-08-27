@@ -1,0 +1,56 @@
+===== rung1 evidence 2026-08-27T20:00:33+00:00 =====
+### A. CONTROL: stock kata QEMU (path=/opt/kata/bin/qemu-system-x86_64) ###
+15:path = "/opt/kata/bin/qemu-system-x86_64"
+QEMU emulator version 11.0.1 (kata-static)
+GUEST_UNAME=6.18.35
+  0000:00:00.0 0x8086:0x29c0
+  0000:00:01.0 0x1af4:0x1003
+  0000:00:02.0 0x1b36:0x0001
+  0000:00:03.0 0x1af4:0x1004
+  0000:00:04.0 0x1af4:0x1005
+  0000:00:05.0 0x1af4:0x1053
+  0000:00:06.0 0x1af4:0x105a
+  0000:00:1f.0 0x8086:0x2918
+  0000:00:1f.2 0x8086:0x2922
+  0000:00:1f.3 0x8086:0x2930
+A rc=0
+
+### B. nvkvm QEMU 11.1.1, NO extra device (isolates the binary swap) ###
+15:path = "/usr/local/bin/nvkvm-qemu-shim"
+QEMU emulator version 11.1.1 (v11.1.1-dirty)
+GUEST_UNAME=6.18.35
+  0000:00:00.0 0x8086:0x29c0
+  0000:00:01.0 0x1af4:0x1003
+  0000:00:02.0 0x1b36:0x0001
+  0000:00:03.0 0x1af4:0x1004
+  0000:00:04.0 0x1af4:0x1005
+  0000:00:05.0 0x1af4:0x1053
+  0000:00:06.0 0x1af4:0x105a
+  0000:00:1f.0 0x8086:0x2918
+  0000:00:1f.2 0x8086:0x2922
+  0000:00:1f.3 0x8086:0x2930
+B rc=0
+
+### C. nvkvm QEMU + -device virtio-nvgpu-pci-non-transitional ###
+GUEST_UNAME=6.18.35
+  0000:00:00.0 0x8086:0x29c0
+  0000:00:01.0 0x1af4:0x1003
+  0000:00:02.0 0x1b36:0x0001
+  0000:00:03.0 0x1af4:0x1004
+  0000:00:04.0 0x1af4:0x1005
+  0000:00:05.0 0x1af4:0x1053
+  0000:00:06.0 0x1af4:0x105a
+  0000:00:07.0 0x1af4:0x1072
+  0000:00:1f.0 0x8086:0x2918
+  0000:00:1f.2 0x8086:0x2922
+  0000:00:1f.3 0x8086:0x2930
+C rc=0
+
+### D. what the VMM process actually is, during C ###
+vmm pid: 31029
+exe    : /opt/qemu-nvkvm/bin/qemu-system-x86_64
+cgroup : 0::/default/kata_live-30601
+cmdline has nvgpu: virtio-nvgpu-pci-non-transitional,id=nvkvm0
+open nvidia fds:
+  (none)
+===== done 2026-08-27T20:01:07+00:00 =====

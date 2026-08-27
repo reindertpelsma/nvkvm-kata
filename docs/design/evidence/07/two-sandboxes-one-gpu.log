@@ -1,0 +1,14 @@
+### two Kata sandboxes, one GPU, concurrent (2026-08-27T20:26:36+00:00) ###
+-- while both run --
+  qemu pid 87492 exe=/usr/bin/bash
+     cgroup=0::/user.slice/user-0.slice/session-107.scope
+NVIDIA GeForce RTX 4070 Ti SUPER, 2 MiB
+  host GPU 0000:00:07.0 driver: nvidia  <- never unbound, no vfio-pci
+-- shrA: VECADD OK count = 5 --
+device 0: NVIDIA GeForce RTX 4070 Ti SUPER
+elements: 1048576  mismatches: 0  sample: c[7]=21.0 (want 21.0)
+VECADD OK
+-- shrB: VECADD OK count = 5 --
+device 0: NVIDIA GeForce RTX 4070 Ti SUPER
+elements: 1048576  mismatches: 0  sample: c[7]=21.0 (want 21.0)
+VECADD OK

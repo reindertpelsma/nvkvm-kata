@@ -1,0 +1,98 @@
+=== host NVIDIA userspace bundle for the container ===
+bundle: /root/host-libs-575.51.03
+config
+libEGL_nvidia.so.575.51.03
+libGLESv1_CM_nvidia.so.575.51.03
+libGLESv2_nvidia.so.575.51.03
+libGLX_nvidia.so.575.51.03
+libcuda.so.575.51.03
+libnvcuvid.so.575.51.03
+libnvidia-allocator.so.575.51.03
+libnvidia-cfg.so.575.51.03
+libnvidia-egl-gbm.so.1.1.2
+libnvidia-egl-wayland.so.1.1.19
+libnvidia-eglcore.so.575.51.03
+libnvidia-encode.so.575.51.03
+libnvidia-glcore.so.575.51.03
+libnvidia-glsi.so.575.51.03
+libnvidia-glvkspirv.so.575.51.03
+libnvidia-gpucomp.so.575.51.03
+libnvidia-ml.so.575.51.03
+libnvidia-nvvm.so.575.51.03
+libnvidia-opencl.so.575.51.03
+libnvidia-ptxjitcompiler.so.575.51.03
+libnvidia-rtcore.so.575.51.03
+libnvidia-tls.so.575.51.03
+nvidia-smi
+--- creating SONAME symlink chains (CDI hooks are dropped by kata, kata#11169,
+    so nothing runs ldconfig in the container; the links must be in the mount) ---
+  libEGL_nvidia.so.0 -> libEGL_nvidia.so.575.51.03
+  libEGL_nvidia.so -> libEGL_nvidia.so.575.51.03
+  libGLESv1_CM_nvidia.so.1 -> libGLESv1_CM_nvidia.so.575.51.03
+  libGLESv1_CM_nvidia.so -> libGLESv1_CM_nvidia.so.575.51.03
+  libGLESv2_nvidia.so.2 -> libGLESv2_nvidia.so.575.51.03
+  libGLESv2_nvidia.so -> libGLESv2_nvidia.so.575.51.03
+  libGLX_nvidia.so.0 -> libGLX_nvidia.so.575.51.03
+  libGLX_nvidia.so -> libGLX_nvidia.so.575.51.03
+  libcuda.so.1 -> libcuda.so.575.51.03
+  libcuda.so -> libcuda.so.575.51.03
+  libnvcuvid.so.1 -> libnvcuvid.so.575.51.03
+  libnvcuvid.so -> libnvcuvid.so.575.51.03
+  libnvidia-allocator.so.1 -> libnvidia-allocator.so.575.51.03
+  libnvidia-allocator.so -> libnvidia-allocator.so.575.51.03
+  libnvidia-cfg.so.1 -> libnvidia-cfg.so.575.51.03
+  libnvidia-cfg.so -> libnvidia-cfg.so.575.51.03
+  libnvidia-egl-gbm.so.1 -> libnvidia-egl-gbm.so.1.1.2
+  libnvidia-egl-gbm.so -> libnvidia-egl-gbm.so.1.1.2
+  libnvidia-egl-wayland.so.1 -> libnvidia-egl-wayland.so.1.1.19
+  libnvidia-egl-wayland.so -> libnvidia-egl-wayland.so.1.1.19
+  libnvidia-eglcore.so -> libnvidia-eglcore.so.575.51.03
+  libnvidia-encode.so.1 -> libnvidia-encode.so.575.51.03
+  libnvidia-encode.so -> libnvidia-encode.so.575.51.03
+  libnvidia-glcore.so -> libnvidia-glcore.so.575.51.03
+  libnvidia-glsi.so -> libnvidia-glsi.so.575.51.03
+  libnvidia-glvkspirv.so -> libnvidia-glvkspirv.so.575.51.03
+  libnvidia-gpucomp.so -> libnvidia-gpucomp.so.575.51.03
+  libnvidia-ml.so.1 -> libnvidia-ml.so.575.51.03
+  libnvidia-ml.so -> libnvidia-ml.so.575.51.03
+  libnvidia-nvvm.so.4 -> libnvidia-nvvm.so.575.51.03
+  libnvidia-nvvm.so -> libnvidia-nvvm.so.575.51.03
+  libnvidia-opencl.so.1 -> libnvidia-opencl.so.575.51.03
+  libnvidia-opencl.so -> libnvidia-opencl.so.575.51.03
+  libnvidia-ptxjitcompiler.so.1 -> libnvidia-ptxjitcompiler.so.575.51.03
+  libnvidia-ptxjitcompiler.so -> libnvidia-ptxjitcompiler.so.575.51.03
+  libnvidia-rtcore.so -> libnvidia-rtcore.so.575.51.03
+  libnvidia-tls.so -> libnvidia-tls.so.575.51.03
+--- final ---
+lrwxrwxrwx 1 root root        20 Aug 27 20:11 libcuda.so -> libcuda.so.575.51.03
+lrwxrwxrwx 1 root root        20 Aug 27 20:11 libcuda.so.1 -> libcuda.so.575.51.03
+-rw-r--r-- 1 root root  92316728 Aug 27 20:11 libcuda.so.575.51.03
+lrwxrwxrwx 1 root root        25 Aug 27 20:11 libnvidia-ml.so -> libnvidia-ml.so.575.51.03
+lrwxrwxrwx 1 root root        25 Aug 27 20:11 libnvidia-ml.so.1 -> libnvidia-ml.so.575.51.03
+-rw-r--r-- 1 root root   2291800 Aug 27 20:11 libnvidia-ml.so.575.51.03
+lrwxrwxrwx 1 root root        27 Aug 27 20:11 libnvidia-nvvm.so -> libnvidia-nvvm.so.575.51.03
+lrwxrwxrwx 1 root root        27 Aug 27 20:11 libnvidia-nvvm.so.4 -> libnvidia-nvvm.so.575.51.03
+-rw-r--r-- 1 root root  78079592 Aug 27 20:11 libnvidia-nvvm.so.575.51.03
+lrwxrwxrwx 1 root root        37 Aug 27 20:11 libnvidia-ptxjitcompiler.so -> libnvidia-ptxjitcompiler.so.575.51.03
+lrwxrwxrwx 1 root root        37 Aug 27 20:11 libnvidia-ptxjitcompiler.so.1 -> libnvidia-ptxjitcompiler.so.575.51.03
+-rw-r--r-- 1 root root  40562320 Aug 27 20:11 libnvidia-ptxjitcompiler.so.575.51.03
+total 1172
+-rwxr-xr-x 1 root root 1176448 Aug 27 20:11 nvidia-smi
+-rwxr-xr-x 1 root root   16856 Aug 27 20:11 vecadd
+--- control: does it work on the HOST with only this bundle? ---
+devices: 1
+device 0: NVIDIA GeForce RTX 4070 Ti SUPER
+elements: 1048576  mismatches: 0  sample: c[7]=21.0 (want 21.0)
+VECADD OK
+Thu Aug 27 20:11:39 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 575.51.03              Driver Version: 575.51.03      CUDA Version: 12.9     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 4070 ...    Off |   00000000:00:07.0 Off |                  N/A |
+|  0%   32C    P0             24W /  285W |       2MiB /  16376MiB |      5%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+

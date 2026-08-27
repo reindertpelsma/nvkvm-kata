@@ -1,0 +1,66 @@
+===== evidence 2026-08-27T20:15:03+00:00 =====
+### host facts ###
+Linux ubuntu 6.8.0-59-generic #61~22.04.1-Ubuntu SMP PREEMPT_DYNAMIC Tue Apr 15 17:03:15 UTC 2 x86_64 x86_64 x86_64 GNU/Linux
+kvm
+NVRM version: NVIDIA UNIX x86_64 Kernel Module  575.51.03  Wed Apr 16 14:22:51 UTC 2025
+GCC version:  gcc version 12.3.0 (Ubuntu 12.3.0-1ubuntu1~22.04) 
+NVIDIA GeForce RTX 4070 Ti SUPER, 575.51.03
+containerd containerd.io 1.7.27 05044ec0a9a75232cad458027ca83437aae3f4da
+kata-runtime  : 4.1.0
+kata QEMU : QEMU emulator version 11.0.1 (kata-static)
+nvkvm QEMU: QEMU emulator version 11.1.1 (v11.1.1-dirty)
+nvkvm-pv HEAD: (rsynced, no .git)
+kata src HEAD: f6205cf Merge pull request #13715 from manuelh-dev/mahuber/genpolicy-generate-retries
+cgroup: cgroup2fs
+
+### NEGATIVE CONTROL: identical container, VISIBLE_CDI_DEVICES unset ###
+ls: cannot access '/dev/nvidia*': No such file or directory
+nvidia-smi:
+Thu Aug 27 20:15:07 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 575.51.03              Driver Version: 575.51.03      CUDA Version: 12.9     |
+neg rc=0
+
+### POSITIVE: the same container WITH the env var ###
+crw-rw-rw- 1 root root 243,   0 Aug 27 20:15 /dev/nvidia-uvm
+crw-rw-rw- 1 root root 243,   1 Aug 27 20:15 /dev/nvidia-uvm-tools
+crw-rw-rw- 1 root root 195,   0 Aug 27 20:15 /dev/nvidia0
+crw-rw-rw- 1 root root 195, 255 Aug 27 20:15 /dev/nvidiactl
+pos rc=0
+
+### /dev/nvidia-uvm open, isolated (rung3 script exited early on this) ###
+  /dev/nvidiactl OPEN-OK(dd)
+  /dev/nvidia0 OPEN-OK(dd)
+  /dev/nvidia-uvm OPEN-OK(dd)
+  /dev/nvidia-uvm-tools OPEN-OK(dd)
+uvm rc=0
+
+### host-side: guest major vs host major for UVM (the number CDI had to fix) ###
+host   : 236,0
+container: 243,0
+
+### rung 5 again, plus per-container GPU process enumeration ###
+devices: 1
+device 0: NVIDIA GeForce RTX 4070 Ti SUPER
+elements: 1048576  mismatches: 0  sample: c[7]=21.0 (want 21.0)
+VECADD OK
+--- nvidia-smi processes seen from inside ---
+pid, process_name
+6, /usr/local/nvidia/bin/nvidia-smi
+r5b rc=0
+
+### what the VMM holds while a GPU container runs ###
+vmm pid 77333 exe=/opt/qemu-nvkvm/bin/qemu-system-x86_64
+cgroup: 0::/default/kata_hold-76771
+nvidia fds held by QEMU itself:
+  lrwx------ 1 root root 64 Aug 27 20:15 121 -> /dev/nvidiactl
+  lrwx------ 1 root root 64 Aug 27 20:15 122 -> /dev/nvidia-uvm
+  lrwx------ 1 root root 64 Aug 27 20:15 123 -> /dev/nvidia0
+  lrwx------ 1 root root 64 Aug 27 20:15 124 -> /dev/nvidia0
+  lrwx------ 1 root root 64 Aug 27 20:15 125 -> /dev/nvidia0
+  lrwx------ 1 root root 64 Aug 27 20:15 126 -> /dev/nvidia0
+  lrwx------ 1 root root 64 Aug 27 20:15 127 -> /dev/nvidia0
+  lrwx------ 1 root root 64 Aug 27 20:15 128 -> /dev/nvidiactl
+isolate processes (children of QEMU):
+pid, used_gpu_memory [MiB]
+===== evidence done 2026-08-27T20:15:44+00:00 =====

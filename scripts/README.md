@@ -1,6 +1,7 @@
 # scripts/
 
-Two of these are now **real, self-testing experiments**; one is still a stub.
+All of these are real. The two experiment scripts are self-testing; the five
+`07` scripts were exercised end to end on real hardware.
 Every script that can be exercised without hardware has a `--self-test` that
 rents nothing, needs no GPU and no Kata, and proves the machinery it depends on
 before you trust a result from it.
@@ -9,7 +10,17 @@ before you trust a result from it.
 |---|---|---|
 | `check-vmm-device-access.sh` | **implemented** — the Q1 experiment | [01](../docs/design/01-vmm-confinement.md) |
 | `split-cdi-spec.sh` | **implemented** — split a host CDI spec | [02](../docs/design/02-libraries-via-cdi.md) |
-| `build-guest-kernel.sh` | stub | [04](../docs/design/04-guest-kernel.md) |
+| `build-guest-kernel.sh` | **implemented and run end to end** | [04](../docs/design/04-guest-kernel.md), [07](../docs/design/07-end-to-end.md) |
+| `prepare-guest-rootfs.sh` | **implemented and run end to end** | [07](../docs/design/07-end-to-end.md) |
+| `inject-guest-modules.sh` | **implemented and run end to end** | [04](../docs/design/04-guest-kernel.md), [07](../docs/design/07-end-to-end.md) |
+| `nvkvm-qemu-shim.sh` | **implemented and run end to end** | [07](../docs/design/07-end-to-end.md) |
+| `e2e/vecadd.c` | **implemented** — the rung-5 proof | [07](../docs/design/07-end-to-end.md) |
+
+The last five were written for [07](../docs/design/07-end-to-end.md), which ran
+a CUDA workload in an OCI container in a Kata VM through nvkvm on a real
+RTX 4070 Ti SUPER. Read that document before using them: two of its findings
+(the container device cgroup is not enforced in the guest; the shipped Kata
+rootfs has no `modprobe`) change what the earlier design docs claim.
 
 ## `check-vmm-device-access.sh`
 
