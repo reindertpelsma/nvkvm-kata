@@ -432,25 +432,73 @@ for you*. It does not control *access*. The negative control in
 same tool, denies. The allowlist is in the spec; something between the spec and
 the guest's cgroup is not applying it.
 
-**UNVERIFIED: where.** Candidates, cheapest first — (a) rustjail does not attach
-a BPF_CGROUP_DEVICE program on cgroup v2 in this configuration; (b) the guest's
-cgroup v2 hierarchy is not set up for the container at all (the container
-reports `/proc/self/cgroup` = `0::/`, versus `0::/default/<id>` under runc);
-(c) the same `containerd/cgroups` `v2.ToResources()` bug [01 §1.6](01-vmm-confinement.md)
-found on the host, reached by a different route. **Settling experiment:** boot
-the guest with `agent.debug_console_vport`, get a shell in the guest (not the
-container), and run the `BPF_PROG_QUERY(BPF_CGROUP_DEVICE)` walk that
-[`scripts/check-vmm-device-access.sh`](../../scripts/check-vmm-device-access.sh)
-already implements, against the container's cgroup. That script needs no
-changes; it needs a way in.
+**ROOT CAUSE — found, and it is a library bug, not a Kata design choice.**
+Followed all the way down, with a guest shell (`kata-runtime exec`, needs
+`debug_console_enabled = true` and a pty):
 
-**Why it matters.** [01 §1.6](01-vmm-confinement.md) found the *host* sandbox
-cgroup carries no device policy on cgroup v2. This is the same shape one layer
-down. Together they mean that today, on a cgroup v2 host, **neither the VMM's
-cgroup nor the container's cgroup restricts device access** — and the second one
-is inside the guest, where [03](03-guest-side-devices.md) placed the whole
-gate. Any claim that CDI "provides the cgroup rule for free" needs this
-measurement attached to it.
+1. The guest kernel supports it. `CONFIG_CGROUP_DEVICE=y`, `CONFIG_BPF_SYSCALL=y`,
+   `CONFIG_CGROUP_BPF=y` in both our kernel and the shipped
+   `config-6.18.35-202` — they come from
+   `tools/packaging/kernel/configs/fragments/common/cgroup.conf:13,26-27`. Not
+   the kernel.
+2. The container's cgroup exists. `/sys/fs/cgroup/default/dbgcon`, created by
+   the agent. Not a missing cgroup.
+3. The agent computes the rules. `set_devices_resources`
+   (`src/agent/rustjail/src/cgroups/fs/mod.rs:340-360`) fills
+   `res.devices.devices` from the OCI spec. Not a missing computation.
+   (It does drop the `allow: false` catch-all via `rule_for_all_devices`, but
+   that is not what breaks here.)
+4. **`cgroups-rs` has no devices subsystem on cgroup v2.** Kata pins
+   `cgroups-rs 0.5.1` (`Cargo.toml:160`). Its **v1** hierarchy constructs one —
+   `hierarchies.rs:145-146`, `Subsystem::Devices(DevicesController::new(...))`.
+   Its **v2** hierarchy (`hierarchies.rs:203-208`) builds the subsystem list by
+   *reading `/sys/fs/cgroup/cgroup.controllers` and matching controller names* —
+   and `devices` is never in that file, because on cgroup v2 device control is
+   not a controller, it is a `BPF_CGROUP_DEVICE` program attachment. So
+   `Subsystem::Devices` can never be constructed on v2, and `res.devices.devices`
+   is silently discarded.
+
+MEASURED, from the guest shell, closing the loop on step 4:
+
+```
+# cat /sys/fs/cgroup/cgroup.controllers
+cpuset cpu io memory hugetlb pids rdma
+```
+
+No `devices`. There is nothing for the library to find, and it does not fall
+back to attaching a BPF program.
+
+**This is the same bug as [01 §1.6](01-vmm-confinement.md), one layer down and
+in a different language.** On the host, `containerd/cgroups` `v2.ToResources()`
+never assigns `Resources.Devices`, so Kata's sandbox device allowlist is
+dropped. In the guest, `cgroups-rs` `V2::subsystems()` never yields a devices
+subsystem, so the container's device allowlist is dropped. Two independent
+libraries, the same silent failure, and between them **no device cgroup is
+enforced anywhere on a cgroup v2 Kata host** — not around the VMM, not around
+the container.
+
+**Why it matters.** [03](03-guest-side-devices.md) placed the entire gate here,
+and [00](00-overview.md)'s table repeats it. Any claim that CDI "provides the
+cgroup rule for free" now needs this attached: the rule is produced, and then
+thrown away. On this configuration, a container that asks for no GPU can still
+use one — `nvidia-smi` proves it in one command.
+
+**This is the fourth upstream item, and the strongest one yet**, because unlike
+[00 §Phase 4](00-overview.md) items 13-17 it is a plain bug with a two-line
+reproducer and no nvkvm content at all:
+
+> `kata-agent` computes a container device allowlist and, on every cgroup v2
+> host, discards it, because `cgroups-rs 0.5.1`'s v2 hierarchy has no devices
+> subsystem. Reproducer: `ctr run --runtime io.containerd.kata.v2 ubuntu:24.04
+> x sh -c 'mknod /tmp/m c 1 1; cat /tmp/m'` returns ENXIO where the same
+> command under `io.containerd.runc.v2` returns EPERM.
+
+It should be reported **whether or not nvkvm-kata ever ships**, exactly as
+[00 §Phase 4 item 16](00-overview.md) says of the host-side twin. The fix
+belongs in `cgroups-rs` (attach a `BPF_CGROUP_DEVICE` program on v2, as
+`containerd/cgroups` and runc both do) or in rustjail (do it directly, as runc
+does). **UNVERIFIED: whether newer `cgroups-rs` fixes it** — settle by reading
+`hierarchies.rs` in the current release before filing.
 
 ### 8.2 FINDING: there is no `modprobe` in the shipped rootfs
 

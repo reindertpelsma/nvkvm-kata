@@ -17,7 +17,13 @@ exists.
 > ([07 §8.1](07-end-to-end.md#81-finding-the-containers-device-cgroup-is-not-enforced-in-the-guest))
 > it decided nothing: with the *identical* OCI spec, `runc` returned EPERM for a
 > self-`mknod`'d `c 195:255` and Kata did not, and `nvidia-smi` worked in a
-> container that had been given no GPU. Everything below about *where the rule
+> container that had been given no GPU. **Root cause found:** `cgroups-rs 0.5.1`
+> (`Cargo.toml:160`) constructs a devices subsystem on cgroup **v1**
+> (`hierarchies.rs:145-146`) and none on **v2** (`hierarchies.rs:203-208`, which
+> matches controller names out of `cgroup.controllers` — and `devices` is never
+> one there). `set_devices_resources`
+> (`src/agent/rustjail/src/cgroups/fs/mod.rs:340-360`) fills the list and nothing
+> consumes it. Everything below about *where the rule
 > comes from* (a CDI `deviceNodes` entry, applied in the guest) was confirmed,
 > and the guest-generated spec demonstrably fixed the UVM major (host 236 vs
 > guest 243). What was not confirmed is that the rule is ever **enforced**. Read

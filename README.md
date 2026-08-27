@@ -15,10 +15,17 @@ Upstream changes required for any of it: **one line** — widening
 **The two findings, because they are the important part:**
 
 1. **The container's device cgroup is not enforced inside the guest** on
-   cgroup v2. Measured with the *identical* OCI spec under two runtimes: `runc`
-   returns EPERM, Kata does not. [03](docs/design/03-guest-side-devices.md)
-   calls that cgroup "the one that decides"; here it decides nothing, and
-   `nvidia-smi` works in a container that was never given a GPU.
+   cgroup v2, and the **root cause is found**: `cgroups-rs 0.5.1`, which
+   kata-agent uses, builds no devices subsystem on v2 (its v2 hierarchy matches
+   controller names out of `cgroup.controllers`, and `devices` is never one —
+   on v2 it is a BPF attachment). kata-agent computes the allowlist and it is
+   silently thrown away. Measured with the *identical* OCI spec under two
+   runtimes: `runc` returns EPERM, Kata does not, and `nvidia-smi` works in a
+   container that was never given a GPU. **This is the exact twin of the
+   host-side bug in [01 §1.6](docs/design/01-vmm-confinement.md)** — so on a
+   cgroup v2 Kata host, no device cgroup is enforced anywhere, around the VMM
+   or around the container. It is a plain upstream bug with a two-line
+   reproducer and should be reported regardless of this project.
 2. **Kata's shipped generic rootfs cannot load a kernel module.**
    `kernel_modules = [...]` execs `/sbin/modprobe`, and `kata-containers.img`
    4.1.0 ships no modprobe, no kmod and no busybox. The shipped mechanism
