@@ -15,8 +15,28 @@ before you trust a result from it.
 | `inject-guest-modules.sh` | **implemented and run end to end** | [04](../docs/design/04-guest-kernel.md), [07](../docs/design/07-end-to-end.md) |
 | `nvkvm-qemu-shim.sh` | **implemented and run end to end** | [07](../docs/design/07-end-to-end.md) |
 | `e2e/vecadd.c` | **implemented** — the rung-5 proof | [07](../docs/design/07-end-to-end.md) |
+| `nvkvm-kata-install.sh` | **implemented and run end to end** — source → installed, one script | [install](../docs/install.md) |
+| `nvkvm-kata-uninstall.sh` | **implemented and run** — reverts from the install manifest | [install](../docs/install.md#uninstall) |
+| `lib/kata-conf-edit.py` | derive a second `configuration.toml` without losing its comments | [install §5c](../docs/install.md#5c-the-second-configuration) |
+| `lib/docker-runtime.py` | add/remove one named runtime in `/etc/docker/daemon.json` | [install §6b](../docs/install.md#6b-docker--one-key-in-daemonjson---what-runtime-in-compose-reads) |
 
-The last five were written for [07](../docs/design/07-end-to-end.md), which ran
+## `nvkvm-kata-install.sh` — the one that installs it
+
+```bash
+sudo ./scripts/nvkvm-kata-install.sh --install-kata --install-deps
+```
+
+Source to installed, in nine stages (0-8), ending by **running the CUDA proof** on
+the runtime it just registered. Every stage maps 1:1 onto a numbered section of
+[`docs/install.md`](../docs/install.md), which is the manual path and stays
+first-class: the script runs those commands, it does not replace them.
+
+Idempotent (check first, act only if wrong, log what changed), stamped so a
+re-run does not rebuild, and `--build` / `--install` are separable so a prebuilt
+tarball later is just a cached build stage. Revert with
+`nvkvm-kata-uninstall.sh`, which works from the manifest the installer wrote.
+
+The five scripts below it were written for [07](../docs/design/07-end-to-end.md), which ran
 a CUDA workload in an OCI container in a Kata VM through nvkvm on a real
 RTX 4070 Ti SUPER. Read that document before using them: two of its findings
 (the container device cgroup is not enforced in the guest; the shipped Kata

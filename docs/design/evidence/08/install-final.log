@@ -1,0 +1,77 @@
+[nvkvm-kata] ===== stage 0/8  preflight =====
+[nvkvm-kata]   ok   /dev/kvm present (kvm)
+[nvkvm-kata]   ok   NVIDIA host driver 575.51.03
+[nvkvm-kata]   ok   cgroup v2
+[nvkvm-kata] WARNING: on cgroup v2 the container device cgroup is NOT enforced inside the guest
+[nvkvm-kata] WARNING:   (kata-agent computes the allowlist and cgroups-rs discards it --
+[nvkvm-kata] WARNING:    docs/design/07-end-to-end.md §8.1).  VISIBLE_CDI_DEVICES controls
+[nvkvm-kata] WARNING:    which device NODES are created, not access.  Do not rely on it as a boundary.
+[nvkvm-kata]   ok   Kata 4.1.0 at /opt/kata
+[nvkvm-kata]   ok   containerd 1.7.27
+[nvkvm-kata]   ok   docker 28.1.1 (>= 23, supports containerd shims as named runtimes)
+[nvkvm-kata]   ok   build dependencies present
+[nvkvm-kata]   ok   129 GB free on /var/lib/nvkvm-kata/build
+[nvkvm-kata]   ok   nvkvm-pv: /root/nvkvm-pv
+[nvkvm-kata]   ok   kata-containers source: /var/lib/nvkvm-kata/src/kata-containers
+[nvkvm-kata]   ok   yq: yq (https://github.com/mikefarah/yq/) version v4.44.5
+[nvkvm-kata]   ok   preflight passed
+[nvkvm-kata] ===== stage 1/8  Kata Containers =====
+[nvkvm-kata]   ok   already installed: Kata 4.1.0 at /opt/kata
+[nvkvm-kata]  CHANGED  linked /usr/local/bin/containerd-shim-kata-v2 -> /opt/kata/bin/
+[nvkvm-kata]  CHANGED  installed stock /etc/kata-containers/configuration.toml
+[nvkvm-kata] ===== stage 2/8  nvkvm's QEMU =====
+[nvkvm-kata]   ok   already built: /opt/qemu-nvkvm/bin/qemu-system-x86_64
+[nvkvm-kata]   ok   /opt/qemu-nvkvm/bin/qemu-system-x86_64 has virtio-nvgpu (QEMU emulator version 11.1.1 (v11.1.1-dirty))
+[nvkvm-kata] ===== stage 3/8  guest kernel + nvkvm-guest.ko =====
+[nvkvm-kata]   ok   already built: 6.18.35-nvkvm (stamp matches)
+[nvkvm-kata] ===== stage 4/8  guest rootfs (kmod + CDI generator + the module) =====
+[nvkvm-kata]   ok   already built: /var/lib/nvkvm-kata/build/kata-nvkvm.image (stamp matches)
+[nvkvm-kata] ===== stage 5/8  the QEMU shim and a second Kata configuration =====
+[nvkvm-kata]   ok   installed shim, vmlinuz-6.18.35-nvkvm and kata-nvkvm.image under /opt/nvkvm-kata
+[nvkvm-kata]  CHANGED  wrote /etc/nvkvm-kata/shim.env (NVKVM_QEMU=/opt/qemu-nvkvm/bin/qemu-system-x86_64)
+[nvkvm-kata] configuration template: /etc/kata-containers/configuration.toml
+[nvkvm-kata]  CHANGED  wrote /etc/kata-containers/configuration-nvkvm.toml
+[nvkvm-kata]   ok   configuration asserted: shim, kernel 6.18.35-nvkvm, nvkvm image, kernel_modules, visible_cdi_devices
+[nvkvm-kata]  CHANGED  wrote /usr/local/bin/containerd-shim-nvkvm-kata-v2
+[nvkvm-kata]   ok   runtime type: io.containerd.nvkvm-kata.v2
+[nvkvm-kata] ===== stage 6/8  register the runtime with the container engine =====
+[nvkvm-kata]   ok   ctr/nerdctl:  --runtime io.containerd.nvkvm-kata.v2  (no configuration needed)
+[nvkvm-kata]  CHANGED  registered docker runtime 'nvkvm-kata' -> io.containerd.nvkvm-kata.v2 in /etc/docker/daemon.json
+[nvkvm-kata]   ok   docker runtime 'nvkvm-kata' live -- compose can now say: runtime: nvkvm-kata
+[nvkvm-kata]  CHANGED  appended a CRI runtime handler 'nvkvm-kata' to /etc/containerd/config.toml
+[nvkvm-kata] WARNING: /etc/containerd/config.toml has disabled_plugins = ["cri"] -- the CRI plugin is OFF on this host,
+[nvkvm-kata] WARNING:   so the handler just written is INERT.  It is correct and it parses, but nothing
+[nvkvm-kata] WARNING:   will use it until you enable the CRI plugin (Docker does not use it at all).
+[nvkvm-kata]   ok   containerd restarted cleanly with the CRI handler
+[nvkvm-kata] ===== stage 7/8  host driver userspace + the vecadd proof =====
+[nvkvm-kata]  CHANGED  collecting NVIDIA userspace for driver 575.51.03
+[nvkvm-kata]  CHANGED  staged 39 files, 15 SONAME links, driver 575.51.03
+[nvkvm-kata]  CHANGED  staged nvidia-smi
+[nvkvm-kata]  CHANGED  built /opt/nvkvm-kata/nvidia/bin/vecadd
+[nvkvm-kata] ===== stage 8/8  verify -- running the real proof, not a file listing =====
+[nvkvm-kata]  PASS  control: runc still runs containers
+[nvkvm-kata]  PASS  guest kernel is 6.18.35-nvkvm (the nvkvm-kata configuration was selected, not the stock one)
+[nvkvm-kata]  PASS  nvkvm-guest.ko loaded: 195 nvidia 195 nvidiactl 243 nvidia-uvm
+[nvkvm-kata] running the CUDA vector-add in a container on runtime 'nvkvm-kata'...
+[nvkvm-kata]      | devices: 1
+[nvkvm-kata]      | device 0: NVIDIA GeForce RTX 3090
+[nvkvm-kata]      | elements: 1048576  mismatches: 0  sample: c[7]=21.0 (want 21.0)
+[nvkvm-kata]      | VECADD OK
+[nvkvm-kata]  PASS  CUDA vector-add ran on the GPU, in a container, in a Kata VM, through nvkvm
+[nvkvm-kata]  PASS  host driver still bound to the GPU (no VFIO, no unbind)
+[nvkvm-kata] ===== done =====
+[nvkvm-kata]
+[nvkvm-kata]   Select it per container.  Nothing global changed:
+[nvkvm-kata]
+[nvkvm-kata]     services:
+[nvkvm-kata]       cuda:
+[nvkvm-kata]         image: ubuntu:24.04
+[nvkvm-kata]         runtime: nvkvm-kata
+[nvkvm-kata]         environment:
+[nvkvm-kata]           VISIBLE_CDI_DEVICES: nvidia.com/gpu=0
+[nvkvm-kata]           LD_LIBRARY_PATH: /usr/local/nvidia/lib
+[nvkvm-kata]         volumes:
+[nvkvm-kata]           - /opt/nvkvm-kata/nvidia/lib:/usr/local/nvidia/lib:ro
+[nvkvm-kata]
+[nvkvm-kata]   (examples/docker-compose.yml is this, ready to run.)
+[nvkvm-kata]   Revert everything:  scripts/nvkvm-kata-uninstall.sh

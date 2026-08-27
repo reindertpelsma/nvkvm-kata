@@ -33,7 +33,24 @@
 #   NVKVM_QEMU        real qemu binary   (default /opt/qemu-nvkvm/bin/qemu-system-x86_64)
 #   NVKVM_EXTRA_ARGS  extra QEMU args    (default the virtio-nvgpu device)
 #   NVKVM_SHIM_LOG    if set, append the final argv to this file (debugging)
+#
+#   Read from /etc/nvkvm-kata/shim.env when that file exists, so an operator can
+#   point the shim at a different QEMU or add a device WITHOUT a systemd drop-in
+#   on containerd.service.  A drop-in would be global -- it would apply to every
+#   runtime the host has -- whereas this file is read only by this shim, and the
+#   shim runs only for the nvkvm-kata configuration.  Already-set environment
+#   wins, so a drop-in still works if you prefer one.
 set -eu
+
+if [ -r /etc/nvkvm-kata/shim.env ]; then
+    # Only NVKVM_* assignments, and only ones not already set.
+    while IFS='=' read -r _k _v; do
+        case "$_k" in
+            NVKVM_QEMU|NVKVM_EXTRA_ARGS|NVKVM_SHIM_LOG)
+                eval "[ -n \"\${$_k:-}\" ] || { $_k=\$_v; export $_k; }" ;;
+        esac
+    done < /etc/nvkvm-kata/shim.env
+fi
 
 QEMU="${NVKVM_QEMU:-/opt/qemu-nvkvm/bin/qemu-system-x86_64}"
 EXTRA="${NVKVM_EXTRA_ARGS:--device virtio-nvgpu-pci-non-transitional,id=nvkvm0}"

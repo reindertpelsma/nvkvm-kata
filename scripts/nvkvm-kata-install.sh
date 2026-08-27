@@ -1,0 +1,977 @@
+#!/usr/bin/env bash
+# nvkvm-kata-install.sh -- build nvkvm-kata from source and install it on this
+# host, so that a container can select it PER CONTAINER:
+#
+#     services:
+#       cuda:
+#         runtime: nvkvm-kata          # <- stock kata and runc are untouched
+#
+# ONE SCRIPT, SOURCE -> INSTALLED.  It is a CONVENIENCE over the documented
+# manual steps, never a replacement for them: every stage below maps 1:1 onto a
+# numbered section of docs/install.md, and that document is written so a person
+# can do every step by hand and get a byte-equivalent result.  If this script
+# and that document ever disagree, the document is right.
+#
+# HOUSE STYLE (nvkvm-steamos/boot/steamos_boot.sh): check first, act only if
+# wrong, log what changed.  Every stage is idempotent -- running the script
+# twice converges, it does not duplicate.  Nothing is half-installed: the
+# preflight refuses early, with a message that names the fix, rather than
+# failing forty minutes deep in a kernel build.
+#
+# STAGES  (--only <name>, repeatable; --build / --install / --verify are groups)
+#   0 preflight   root, /dev/kvm, NVIDIA driver, Kata, build deps, disk    [always]
+#   1 kata        verify Kata Containers is present (--install-kata fetches it)
+#   2 qemu        build nvkvm's QEMU                        BUILD
+#   3 kernel      guest kernel + nvkvm-guest.ko + depmod    BUILD
+#   4 rootfs      kata-nvkvm.image: kmod, CDI generator, module   BUILD
+#   5 runtime     the shim + /etc/kata-containers/configuration-nvkvm.toml
+#   6 engine      register the runtime with Docker / containerd
+#   7 libs        host driver userspace bundle + the vecadd proof binary
+#   8 verify      RUN the proof: vecadd in a container on the new runtime
+#
+#   BUILD stages (2,3,4) write only into --artifacts (default
+#   /var/lib/nvkvm-kata/build) plus /opt/qemu-nvkvm.  INSTALL stages (1,5,6,7)
+#   read from there and touch the host.  They are separable on purpose: a
+#   prebuilt tarball, later, is nothing but a cached BUILD stage --
+#   `--only install --artifacts /path/to/unpacked/tarball`.
+#
+# UNINSTALL
+#   scripts/nvkvm-kata-uninstall.sh   -- reverts everything, from the manifest
+#   this script writes at /var/lib/nvkvm-kata/install-manifest.
+#
+# USAGE
+#   sudo scripts/nvkvm-kata-install.sh [options]
+#     --nvkvm-src DIR     nvkvm-pv checkout      (default: clone into state dir)
+#     --kata-src  DIR     kata-containers source (default: clone into state dir)
+#     --artifacts DIR     build output dir       (default /var/lib/nvkvm-kata/build)
+#     --prefix    DIR     install prefix         (default /opt/nvkvm-kata)
+#     --runtime-name N    engine runtime name    (default nvkvm-kata)
+#     --graphics  0|1     NVKVM_GRAPHICS         (default 0, compute-only)
+#     --jobs      N       parallel make jobs     (default nproc)
+#     --install-kata      download+install Kata Containers if absent
+#     --kata-version V    Kata release to install (default 4.1.0)
+#     --install-deps      apt-get the build dependencies that are missing
+#     --containerd-cri    also register a CRI runtime handler in containerd
+#     --no-docker         do not touch /etc/docker/daemon.json
+#     --qemu PATH         use this QEMU binary instead of building one
+#     --only STAGE        run only this stage (repeatable)
+#     --build|--install|--verify   stage groups
+#     --force             rebuild even when the artifact stamp already matches
+#     --yes               do not prompt
+set -uo pipefail
+
+# ── constants ────────────────────────────────────────────────────────────────
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+STATE=/var/lib/nvkvm-kata
+ARTIFACTS="$STATE/build"
+BACKUP="$STATE/backup"
+MANIFEST="$STATE/install-manifest"
+PREFIX=/opt/nvkvm-kata
+RUNTIME_NAME=nvkvm-kata
+KATA_VERSION=4.1.0
+KATA_CONF_DIR=/etc/kata-containers
+SHIM_ENV=/etc/nvkvm-kata/shim.env
+GRAPHICS=0
+JOBS="$(nproc 2>/dev/null || echo 4)"
+NVKVM_SRC="" ; KATA_SRC="" ; QEMU_BIN=""
+DO_INSTALL_KATA=0 ; DO_INSTALL_DEPS=0 ; DO_CRI=0 ; NO_DOCKER=0 ; FORCE=0 ; ASSUME_YES=0
+STAGES=()
+MIN_FREE_GB=40
+
+# ── logging ──────────────────────────────────────────────────────────────────
+# All diagnostics on stderr, so a helper's stdout stays its return value.
+log()    { printf '[nvkvm-kata] %s\n' "$*" >&2; }
+step()   { printf '\n[nvkvm-kata] ===== %s =====\n' "$*" >&2; }
+ok()     { printf '[nvkvm-kata]   ok   %s\n' "$*" >&2; }
+change() { printf '[nvkvm-kata]  CHANGED  %s\n' "$*" >&2; }
+warn()   { printf '[nvkvm-kata] WARNING: %s\n' "$*" >&2; }
+die() {
+    printf '\n[nvkvm-kata] FATAL: %s\n' "$1" >&2
+    [ $# -gt 1 ] && printf '[nvkvm-kata]   fix: %s\n' "$2" >&2
+    exit 1
+}
+
+# ── argument parsing ─────────────────────────────────────────────────────────
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --nvkvm-src)    NVKVM_SRC="$2"; shift 2 ;;
+        --kata-src)     KATA_SRC="$2"; shift 2 ;;
+        --artifacts)    ARTIFACTS="$2"; shift 2 ;;
+        --prefix)       PREFIX="$2"; shift 2 ;;
+        --runtime-name) RUNTIME_NAME="$2"; shift 2 ;;
+        --graphics)     GRAPHICS="$2"; shift 2 ;;
+        --jobs)         JOBS="$2"; shift 2 ;;
+        --kata-version) KATA_VERSION="$2"; shift 2 ;;
+        --qemu)         QEMU_BIN="$2"; shift 2 ;;
+        --install-kata) DO_INSTALL_KATA=1; shift ;;
+        --install-deps) DO_INSTALL_DEPS=1; shift ;;
+        --containerd-cri) DO_CRI=1; shift ;;
+        --no-docker)    NO_DOCKER=1; shift ;;
+        --force)        FORCE=1; shift ;;
+        --yes|-y)       ASSUME_YES=1; shift ;;
+        --only)         STAGES+=("$2"); shift 2 ;;
+        --build)        STAGES+=(qemu kernel rootfs); shift ;;
+        --install)      STAGES+=(kata runtime engine libs); shift ;;
+        --verify)       STAGES+=(verify); shift ;;
+        -h|--help)      sed -n '2,70p' "$0"; exit 0 ;;
+        *) die "unknown argument: $1" "run $0 --help" ;;
+    esac
+done
+[ ${#STAGES[@]} -eq 0 ] && STAGES=(kata qemu kernel rootfs runtime engine libs verify)
+
+want() { local s; for s in "${STAGES[@]}"; do [ "$s" = "$1" ] && return 0; done; return 1; }
+
+# ── manifest: every path we create, every file we modify ─────────────────────
+# The uninstaller reads this and nothing else, so "revert" is exact rather than
+# a second list of guesses that drifts from the first.
+manifest_add() {   # kind path [note]
+    mkdir -p "$STATE"
+    grep -qxF "$1	$2	${3:-}" "$MANIFEST" 2>/dev/null && return 0
+    printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}" >> "$MANIFEST"
+}
+backup_once() {    # path -- copy to $BACKUP the first time we touch it
+    # Two statements, not one: `local p="$1" b="...${p#/}..."` expands every
+    # argument BEFORE the builtin assigns any of them, so $p is still unset when
+    # b is built -- "p: unbound variable" under set -u, and a silently wrong
+    # backup filename without it.
+    local p="$1"
+    local b="$BACKUP/$(echo "${p#/}" | tr / _)"
+    mkdir -p "$BACKUP"
+    if [ -e "$b" ] || [ -e "$b.ABSENT" ]; then return 0; fi
+    if [ -e "$p" ]; then cp -a "$p" "$b"; manifest_add modified "$p" "$b"
+    else                 : > "$b.ABSENT";  manifest_add created  "$p" "$b.ABSENT"; fi
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STAGE 0 -- PREFLIGHT.  docs/install.md §0
+# Everything this build needs, checked before anything is built, so a missing
+# 200 KB package fails in one second instead of twenty minutes in.
+# ═════════════════════════════════════════════════════════════════════════════
+KATA_ROOT="" ; KATA_VER_FOUND="" ; DRIVER_VERSION="" ; DOCKER_OK=0 ; CTR_OK=0
+CONTAINERD_MAJOR=""
+
+preflight() {
+    step "stage 0/8  preflight"
+
+    [ "$(id -u)" -eq 0 ] || die "must run as root" "re-run under sudo"
+    [ "$(uname -m)" = "x86_64" ] || die "nvkvm is x86-64 only (this host is $(uname -m))" \
+        "nothing fixes this; see nvkvm-pv/scripts/build_qemu.sh"
+
+    # /dev/kvm.  CPU vmx/svm flags prove nothing -- a container inherits its
+    # host's flags -- so test the device node itself, and say what a container
+    # looks like when it fails.
+    if [ ! -c /dev/kvm ]; then
+        die "/dev/kvm is missing -- Kata cannot start a VM here" \
+            "on a rented GPU box this usually means you got a container, not a VM: check 'systemd-detect-virt' (want kvm/none, not docker)"
+    fi
+    [ -r /dev/kvm ] && [ -w /dev/kvm ] || die "/dev/kvm is not read-write for root" "check ownership/permissions on /dev/kvm"
+    ok "/dev/kvm present ($(systemd-detect-virt 2>/dev/null || echo 'virt unknown'))"
+
+    # NVIDIA driver.  Read /proc, not nvidia-smi: nvidia-smi can fail for
+    # reasons that have nothing to do with the driver being loaded.
+    [ -r /proc/driver/nvidia/version ] || die \
+        "no NVIDIA driver loaded (/proc/driver/nvidia/version is absent)" \
+        "install the NVIDIA driver on the HOST; nvkvm forwards to it and never unbinds it"
+    # The OPEN kernel module puts the arch BETWEEN "Kernel Module" and the
+    # version -- "NVIDIA UNIX Open Kernel Module for x86_64  595.84" -- so
+    # anchoring on "Kernel Module *<digits>" matches the proprietary line only
+    # and dies on every open-module host.  MEASURED: driver 595.84, open.
+    # Take the first version-shaped field on the NVRM line instead, and fall
+    # back to nvidia-smi, which does not depend on that string at all.
+    DRIVER_VERSION="$(awk '/NVRM version/{for(i=1;i<=NF;i++) if ($i ~ /^[0-9]+[.][0-9]+([.][0-9]+)?$/) {print $i; exit}}' \
+                      /proc/driver/nvidia/version 2>/dev/null | head -1)"
+    [ -n "$DRIVER_VERSION" ] || \
+        DRIVER_VERSION="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1)"
+    [ -n "$DRIVER_VERSION" ] || die "could not parse the driver version out of /proc/driver/nvidia/version" \
+        "cat it and report the format"
+    ok "NVIDIA host driver $DRIVER_VERSION"
+    ls /dev/nvidiactl >/dev/null 2>&1 || warn "/dev/nvidiactl is absent -- the driver is loaded but no device node exists"
+
+    # cgroup version -- not fatal, but it changes what is TRUE about isolation,
+    # and a silent v1 host would invalidate docs/design/07's findings.
+    if [ "$(stat -fc %T /sys/fs/cgroup 2>/dev/null)" = "cgroup2fs" ]; then
+        ok "cgroup v2"
+        warn "on cgroup v2 the container device cgroup is NOT enforced inside the guest"
+        warn "  (kata-agent computes the allowlist and cgroups-rs discards it --"
+        warn "   docs/design/07-end-to-end.md §8.1).  VISIBLE_CDI_DEVICES controls"
+        warn "   which device NODES are created, not access.  Do not rely on it as a boundary."
+    else
+        warn "cgroup v1 -- UNTESTED for this stack (docs/design/07 §11 item 5)"
+    fi
+
+    # Kata.
+    detect_kata
+    if [ -z "$KATA_ROOT" ]; then
+        if want kata && [ "$DO_INSTALL_KATA" = 1 ]; then
+            log "Kata Containers not found; --install-kata given, will fetch $KATA_VERSION"
+        else
+            die "Kata Containers is not installed (looked for /opt/kata/bin/containerd-shim-kata-v2)" \
+                "re-run with --install-kata, or install Kata $KATA_VERSION by hand -- docs/install.md §1"
+        fi
+    else
+        ok "Kata $KATA_VER_FOUND at $KATA_ROOT"
+    fi
+
+    # Container engine.
+    if command -v containerd >/dev/null 2>&1; then
+        CTR_OK=1
+        CONTAINERD_MAJOR="$(containerd --version 2>/dev/null | awk '{print $3}' | sed 's/^v//' | cut -d. -f1)"
+        ok "containerd $(containerd --version 2>/dev/null | awk '{print $3}')"
+    else
+        die "containerd is not installed" "apt-get install containerd.io (or docker-ce, which brings it)"
+    fi
+    if [ "$NO_DOCKER" = 0 ] && command -v docker >/dev/null 2>&1; then
+        local dv dmaj
+        dv="$(docker version -f '{{.Server.Version}}' 2>/dev/null)"
+        if [ -z "$dv" ]; then
+            warn "docker CLI present but the daemon does not answer -- skipping Docker registration"
+        else
+            dmaj="${dv%%.*}"
+            if [ "${dmaj:-0}" -ge 23 ] 2>/dev/null; then
+                DOCKER_OK=1; ok "docker $dv (>= 23, supports containerd shims as named runtimes)"
+            else
+                warn "docker $dv is older than 23.0 and cannot map a named runtime onto a containerd shim"
+                warn "  -> skipping Docker registration; the containerd path still works"
+                warn "  -> fix: upgrade Docker, then re-run with --only engine"
+            fi
+        fi
+    fi
+
+    # Build dependencies -- only the ones whose absence is not self-explanatory.
+    if want qemu || want kernel || want rootfs || want libs; then
+        local missing=() need_pkg=()
+        _need() { command -v "$1" >/dev/null 2>&1 || { missing+=("$1"); need_pkg+=("$2"); }; }
+        _need gcc build-essential ; _need make build-essential ; _need git git
+        _need objdump binutils ; _need gzip gzip
+        _need flex flex ; _need bison bison ; _need cpio cpio
+        _need curl curl ; _need zstd zstd ; _need depmod kmod ; _need losetup mount
+        _need python3 python3 ; _need patch patch ; _need file file
+        [ -e /usr/include/linux/kvm.h ] || { missing+=(linux/kvm.h); need_pkg+=(linux-libc-dev); }
+        # One header per operand: `ls a b` exits non-zero when EITHER is
+        # absent, so a glob-plus-literal `ls` reported libssl-dev/libelf-dev
+        # missing on every run, installed or not, and re-ran apt-get each time.
+        _need_hdr() {   # header package
+            local h
+            for h in "/usr/include/$1" /usr/include/*/"$1"; do [ -e "$h" ] && return 0; done
+            missing+=("$1"); need_pkg+=("$2")
+        }
+        _need_hdr openssl/ssl.h libssl-dev
+        _need_hdr libelf.h      libelf-dev
+        command -v docker >/dev/null 2>&1 || { missing+=(docker); need_pkg+=(docker.io); }
+        if [ ${#missing[@]} -gt 0 ]; then
+            local pkgs; pkgs="$(printf '%s\n' "${need_pkg[@]}" | sort -u | tr '\n' ' ')"
+            if [ "$DO_INSTALL_DEPS" = 1 ]; then
+                change "installing build deps: $pkgs"
+                DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+                  && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $pkgs \
+                  || die "apt-get failed installing: $pkgs" "install them by hand and re-run"
+            else
+                die "missing build dependencies: ${missing[*]}" \
+                    "re-run with --install-deps, or: apt-get install $pkgs"
+            fi
+        fi
+        ok "build dependencies present"
+        # QEMU has its own long dependency list; build_qemu.sh --install-deps owns it.
+    fi
+
+    # Disk.  A guest kernel tree plus a QEMU tree plus a 270 MB rootfs copy.
+    local free_gb blocks bsize
+    mkdir -p "$ARTIFACTS"
+    blocks="$(stat -f -c %a "$ARTIFACTS")"; bsize="$(stat -f -c %S "$ARTIFACTS")"
+    free_gb=$(( blocks / 1024 * bsize / 1024 / 1024 ))
+    if [ "$free_gb" -lt "$MIN_FREE_GB" ]; then
+        die "only ${free_gb} GB free on $ARTIFACTS, need >= ${MIN_FREE_GB} GB" \
+            "free space, or point --artifacts at a bigger filesystem"
+    fi
+    ok "${free_gb} GB free on $ARTIFACTS"
+
+    # Sources.
+    resolve_sources
+    want kernel && ensure_yq
+    ok "preflight passed"
+}
+
+# Kata's build-kernel.sh reads tools/packaging/kernel/kata_config_version and
+# versions.yaml with yq(1), and dies "yq command is not in your $PATH" -- a
+# message that arrives AFTER the QEMU build if you let it, which is exactly the
+# fail-late this preflight exists to prevent.  Use Kata's own installer so the
+# version is the one Kata expects (v4.44.5, mikefarah/yq, not the python yq).
+ensure_yq() {
+    if command -v yq >/dev/null 2>&1; then ok "yq: $(yq --version 2>&1 | head -1)"; return 0; fi
+    [ -x "$KATA_SRC/ci/install_yq.sh" ] || die \
+        "yq is not on PATH and $KATA_SRC/ci/install_yq.sh is absent" \
+        "install mikefarah/yq onto PATH -- kata's build-kernel.sh cannot read versions.yaml without it"
+    change "installing yq with kata's own ci/install_yq.sh (INSTALL_IN_GOPATH=false -> /usr/local/bin)"
+    ( cd "$KATA_SRC" && INSTALL_IN_GOPATH=false ./ci/install_yq.sh >/dev/null 2>&1 ) \
+        || die "kata's ci/install_yq.sh failed" "install mikefarah/yq onto PATH by hand"
+    # Deliberately NOT recorded in the manifest: yq is a general-purpose tool and
+    # an uninstall of nvkvm-kata has no business deleting it.
+    command -v yq >/dev/null 2>&1 || die "yq still not on PATH after ci/install_yq.sh" "install it by hand"
+    ok "yq: $(yq --version 2>&1 | head -1)"
+}
+
+detect_kata() {
+    KATA_ROOT="" ; KATA_VER_FOUND=""
+    local r
+    for r in /opt/kata /usr/local /usr; do
+        if [ -x "$r/bin/containerd-shim-kata-v2" ]; then KATA_ROOT="$r"; break; fi
+    done
+    [ -n "$KATA_ROOT" ] || return 0
+    if [ -x "$KATA_ROOT/bin/kata-runtime" ]; then
+        # `kata-runtime --version` prints "kata-runtime  : 4.1.0" on the first
+        # line, then commit and OCI spec lines.  Take the first version-looking
+        # token, not a keyword match -- the word "version" never appears.
+        KATA_VER_FOUND="$("$KATA_ROOT/bin/kata-runtime" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^ ]*' | head -1)"
+    fi
+    [ -n "$KATA_VER_FOUND" ] || KATA_VER_FOUND="unknown"
+}
+
+resolve_sources() {
+    if [ -z "$NVKVM_SRC" ]; then
+        for c in /workspace/nvkvm-pv "$REPO/../nvkvm-pv" "$STATE/src/nvkvm-pv"; do
+            [ -f "$c/src/guest/Makefile" ] && { NVKVM_SRC="$(cd "$c" && pwd)"; break; }
+        done
+    fi
+    if [ -z "$KATA_SRC" ]; then
+        for c in "$STATE/src/kata-containers" /root/kata-containers; do
+            [ -d "$c/tools/packaging/kernel" ] && { KATA_SRC="$(cd "$c" && pwd)"; break; }
+        done
+    fi
+    if want qemu || want kernel; then
+        [ -n "$NVKVM_SRC" ] || die "no nvkvm-pv checkout found" \
+            "pass --nvkvm-src DIR, or: git clone https://github.com/reindertpelsma/nvkvm-pv $STATE/src/nvkvm-pv"
+        [ -f "$NVKVM_SRC/src/guest/Makefile" ] || die "$NVKVM_SRC is not an nvkvm-pv checkout" "expected src/guest/Makefile in it"
+        ok "nvkvm-pv: $NVKVM_SRC"
+    fi
+    if want kernel; then
+        if [ -z "$KATA_SRC" ]; then
+            change "cloning kata-containers source into $STATE/src/kata-containers"
+            mkdir -p "$STATE/src"
+            git clone --depth 1 https://github.com/kata-containers/kata-containers "$STATE/src/kata-containers" \
+                >/dev/null 2>&1 || die "clone of kata-containers failed" "clone it by hand and pass --kata-src"
+            KATA_SRC="$STATE/src/kata-containers"
+        fi
+        [ -d "$KATA_SRC/tools/packaging/kernel" ] || die "$KATA_SRC is not a kata-containers checkout" "expected tools/packaging/kernel in it"
+        ok "kata-containers source: $KATA_SRC"
+    fi
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STAGE 1 -- KATA.  docs/install.md §1
+# ═════════════════════════════════════════════════════════════════════════════
+stage_kata() {
+    step "stage 1/8  Kata Containers"
+    detect_kata
+    if [ -n "$KATA_ROOT" ]; then ok "already installed: Kata $KATA_VER_FOUND at $KATA_ROOT"; else
+        [ "$DO_INSTALL_KATA" = 1 ] || die "Kata is absent and --install-kata was not given" "re-run with --install-kata"
+        # BOTH tarballs.  kata-static carries the guest assets and the VMMs;
+        # kata-go-static carries containerd-shim-kata-v2 and the configs.
+        # Installing only the first leaves configuration.toml a DANGLING SYMLINK
+        # and no shim -- measured, docs/design/07-end-to-end.md §10.
+        local a url
+        for a in kata-static kata-go-static; do
+            url="https://github.com/kata-containers/kata-containers/releases/download/${KATA_VERSION}/${a}-${KATA_VERSION}-amd64.tar.zst"
+            change "fetching $a $KATA_VERSION"
+            curl -fsSL -o "$STATE/$a.tar.zst" "$url" || die "download failed: $url" "check the version with --kata-version"
+            tar -I zstd -xf "$STATE/$a.tar.zst" -C / || die "extract failed for $a" "check disk space in /opt"
+            rm -f "$STATE/$a.tar.zst"
+        done
+        manifest_add created /opt/kata "kata-$KATA_VERSION installed by this script"
+        detect_kata
+        [ -n "$KATA_ROOT" ] || die "Kata still not found after extracting both tarballs" "inspect /opt/kata"
+        change "installed Kata $KATA_VERSION at $KATA_ROOT"
+    fi
+
+    # The stock shim on PATH, so the stock `kata` runtime keeps working.  Only
+    # create it if it is missing: never overwrite someone's existing shim.
+    if [ ! -e /usr/bin/containerd-shim-kata-v2 ] && [ ! -e /usr/local/bin/containerd-shim-kata-v2 ]; then
+        ln -sf "$KATA_ROOT/bin/containerd-shim-kata-v2" /usr/local/bin/containerd-shim-kata-v2
+        manifest_add created /usr/local/bin/containerd-shim-kata-v2
+        change "linked /usr/local/bin/containerd-shim-kata-v2 -> $KATA_ROOT/bin/"
+    else
+        ok "stock kata shim already on PATH"
+    fi
+
+    # The stock configuration, if the admin has none.  We never edit it.
+    if [ ! -e "$KATA_CONF_DIR/configuration.toml" ]; then
+        mkdir -p "$KATA_CONF_DIR"
+        cp "$(stock_kata_config)" "$KATA_CONF_DIR/configuration.toml"
+        manifest_add created "$KATA_CONF_DIR/configuration.toml"
+        change "installed stock $KATA_CONF_DIR/configuration.toml"
+    else
+        ok "stock $KATA_CONF_DIR/configuration.toml present -- NOT touched"
+    fi
+}
+
+stock_kata_config() {
+    local c
+    for c in "$KATA_ROOT/share/defaults/kata-containers/configuration-qemu.toml" \
+             "$KATA_ROOT/share/defaults/kata-containers/configuration.toml"; do
+        # -e follows symlinks; the shipped configuration.toml is a symlink and
+        # is DANGLING when only one of the two tarballs was installed.
+        [ -e "$c" ] && { readlink -f "$c"; return 0; }
+    done
+    die "no stock Kata QEMU configuration found under $KATA_ROOT/share/defaults/kata-containers" \
+        "install the kata-static tarball too -- docs/install.md §1"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STAGE 2 -- QEMU.  docs/install.md §2
+# ═════════════════════════════════════════════════════════════════════════════
+# --qemu must take effect even when the qemu STAGE is not in --only, because
+# stage_runtime writes this path into /etc/nvkvm-kata/shim.env.  Honouring it
+# only inside stage_qemu means `--only runtime` silently writes the DEFAULT
+# QEMU into shim.env -- a VM that boots on the wrong hypervisor, with no error.
+# MEASURED: `--only runtime --qemu /opt/qemu-nvkvm-kata/...` wrote
+# NVKVM_QEMU=/opt/qemu-nvkvm/... instead.
+NVKVM_QEMU_PATH="${QEMU_BIN:-/opt/qemu-nvkvm/bin/qemu-system-x86_64}"
+stage_qemu() {
+    step "stage 2/8  nvkvm's QEMU"
+    if [ -n "$QEMU_BIN" ]; then
+        [ -x "$QEMU_BIN" ] || die "--qemu $QEMU_BIN is not executable" "point it at a built qemu-system-x86_64"
+        NVKVM_QEMU_PATH="$QEMU_BIN"
+    elif [ -x "$NVKVM_QEMU_PATH" ] && [ "$FORCE" = 0 ]; then
+        ok "already built: $NVKVM_QEMU_PATH"
+    else
+        change "building nvkvm QEMU (this is the long one, ~10-20 min on a cold tree)"
+        local fargs=(--install-deps); [ "$FORCE" = 1 ] && fargs+=(--force)
+        bash "$NVKVM_SRC/scripts/build_qemu.sh" "${fargs[@]}" \
+            || die "nvkvm QEMU build failed" "run $NVKVM_SRC/scripts/build_qemu.sh by hand and read its output"
+    fi
+    # Assert the device exists.  A QEMU that builds but has no virtio-nvgpu is
+    # the failure mode that produces a booting VM with no GPU and no clue why.
+    "$NVKVM_QEMU_PATH" -device help 2>/dev/null | grep -q 'virtio-nvgpu' \
+        || die "$NVKVM_QEMU_PATH has no virtio-nvgpu device" \
+               "the QEMU build did not apply nvkvm's patches: rebuild with --force"
+    ok "$NVKVM_QEMU_PATH has virtio-nvgpu ($("$NVKVM_QEMU_PATH" --version | head -1))"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STAGE 3 -- GUEST KERNEL.  docs/install.md §3
+# The one upstream change in the whole project lives inside build-guest-kernel.sh
+# (widening build-kernel.sh's -g vendor validation), and so does the depmod that
+# neither build-kernel.sh nor rootfs.sh runs.
+# ═════════════════════════════════════════════════════════════════════════════
+stage_kernel() {
+    step "stage 3/8  guest kernel + nvkvm-guest.ko"
+    mkdir -p "$ARTIFACTS"
+    local nvkvm_sha; nvkvm_sha="$(git -C "$NVKVM_SRC" rev-parse HEAD 2>/dev/null || echo unknown)"
+    local stamp="$ARTIFACTS/kernel.stamp"
+    local want_stamp="nvkvm=$nvkvm_sha graphics=$GRAPHICS"
+
+    if [ "$FORCE" = 0 ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want_stamp" ] \
+       && [ -f "$ARTIFACTS/release" ] && [ -f "$ARTIFACTS/vmlinuz-$(cat "$ARTIFACTS/release")" ] \
+       && [ -d "$ARTIFACTS/modules" ]; then
+        ok "already built: $(cat "$ARTIFACTS/release") (stamp matches)"
+        return 0
+    fi
+    change "building guest kernel (NVKVM_GRAPHICS=$GRAPHICS, -j$JOBS)"
+    bash "$HERE/build-guest-kernel.sh" \
+        --kata-src "$KATA_SRC" --nvkvm-src "$NVKVM_SRC" \
+        --out "$ARTIFACTS" --graphics "$GRAPHICS" --jobs "$JOBS" \
+        || die "guest kernel build failed" "re-run scripts/build-guest-kernel.sh by hand -- docs/install.md §3"
+    printf '%s' "$want_stamp" > "$stamp"
+    local rel; rel="$(cat "$ARTIFACTS/release")"
+    # build-guest-kernel.sh asserts modules.dep itself; assert the output here
+    # too, because a stage that reports success without an artifact is the exact
+    # failure this project has been bitten by.
+    [ -f "$ARTIFACTS/vmlinuz-$rel" ] || die "no vmlinuz-$rel in $ARTIFACTS" "the kernel stage reported success but produced nothing"
+    grep -q 'nvkvm-guest\.ko' "$ARTIFACTS/modules/lib/modules/$rel/modules.dep" \
+        || die "modules.dep does not mention nvkvm-guest.ko" "modprobe would fail in the guest -- docs/design/04-guest-kernel.md"
+    ok "guest kernel $rel, module depmod'd and resolvable"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STAGE 4 -- GUEST ROOTFS.  docs/install.md §4
+# Always rebuilt from the pristine stock image, never edited in place, so the
+# stage is idempotent by construction rather than by cleanup.
+# ═════════════════════════════════════════════════════════════════════════════
+NVKVM_IMAGE=""
+stage_rootfs() {
+    step "stage 4/8  guest rootfs (kmod + CDI generator + the module)"
+    [ -f "$ARTIFACTS/release" ] || die "no kernel artifacts in $ARTIFACTS" "run the kernel stage first (--only kernel)"
+    local rel; rel="$(cat "$ARTIFACTS/release")"
+    detect_kata
+    [ -n "$KATA_ROOT" ] || die "Kata not found" "run the kata stage first"
+
+    local stock=""
+    for c in "$KATA_ROOT/share/kata-containers/kata-ubuntu-noble.image" \
+             "$KATA_ROOT/share/kata-containers/kata-containers.img"; do
+        [ -e "$c" ] && { stock="$(readlink -f "$c")"; break; }
+    done
+    [ -n "$stock" ] || die "no stock Kata rootfs image found in $KATA_ROOT/share/kata-containers" \
+        "install the kata-static tarball -- docs/install.md §1"
+
+    NVKVM_IMAGE="$ARTIFACTS/kata-nvkvm.image"
+    local stamp="$ARTIFACTS/rootfs.stamp"
+    local want_stamp; want_stamp="rel=$rel stock=$(sha256sum "$stock" | cut -c1-16)"
+    if [ "$FORCE" = 0 ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want_stamp" ] && [ -f "$NVKVM_IMAGE" ]; then
+        ok "already built: $NVKVM_IMAGE (stamp matches)"
+        return 0
+    fi
+
+    change "copying stock rootfs $(basename "$stock") -> $(basename "$NVKVM_IMAGE")"
+    rm -f "$NVKVM_IMAGE" "$NVKVM_IMAGE.orig"
+    cp -f "$stock" "$NVKVM_IMAGE"
+
+    # 4a. kmod + the guest-side CDI generator.  Kata's shipped rootfs has NO
+    #     modprobe, no kmod and no busybox, so the shipped kernel_modules
+    #     mechanism cannot run on the shipped image at all.
+    bash "$HERE/prepare-guest-rootfs.sh" --image "$NVKVM_IMAGE" \
+        || die "prepare-guest-rootfs.sh failed" "docs/install.md §4a"
+    # 4b. the module + a VALID modules.dep.
+    bash "$HERE/inject-guest-modules.sh" --image "$NVKVM_IMAGE" \
+        --modules "$ARTIFACTS/modules" --release "$rel" \
+        || die "inject-guest-modules.sh failed" "docs/install.md §4b"
+    rm -f "$NVKVM_IMAGE.orig"
+
+    printf '%s' "$want_stamp" > "$stamp"
+    ok "$NVKVM_IMAGE ($(du -h "$NVKVM_IMAGE" | cut -f1))"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STAGE 5 -- RUNTIME.  docs/install.md §5
+# The shim, the shim's environment file, and a SECOND Kata configuration.  The
+# stock /etc/kata-containers/configuration.toml is never read except as a
+# template and never written.
+# ═════════════════════════════════════════════════════════════════════════════
+NVKVM_CONF="" ; SHIM_PATH=""
+stage_runtime() {
+    step "stage 5/8  the QEMU shim and a second Kata configuration"
+    local rel; rel="$(cat "$ARTIFACTS/release" 2>/dev/null)" || true
+    [ -n "$rel" ] || die "no $ARTIFACTS/release" "run the build stages first (--build)"
+    [ -f "$ARTIFACTS/kata-nvkvm.image" ] || die "no $ARTIFACTS/kata-nvkvm.image" "run the rootfs stage first"
+    detect_kata
+    [ -n "$KATA_ROOT" ] || die "Kata not found" "run the kata stage first"
+
+    NVKVM_CONF="$KATA_CONF_DIR/configuration-nvkvm.toml"
+    SHIM_PATH="$PREFIX/bin/nvkvm-qemu-shim"
+    # The shim exec()s this.  Assert it here as well as in stage 2, because
+    # --only runtime skips stage 2 entirely and a shim pointing at nothing
+    # fails as an unattributable "failed to create shim task".
+    [ -x "$NVKVM_QEMU_PATH" ] || die "no nvkvm QEMU at $NVKVM_QEMU_PATH" \
+        "run the qemu stage (--only qemu), or pass --qemu /path/to/qemu-system-x86_64"
+
+    # --- 5a. install the artifacts under one prefix ------------------------
+    install -d "$PREFIX/bin" "$PREFIX/share" "$PREFIX/nvidia/lib" "$PREFIX/nvidia/bin"
+    manifest_add created "$PREFIX"
+    install -m0755 "$HERE/nvkvm-qemu-shim.sh" "$SHIM_PATH"
+    install -m0644 "$ARTIFACTS/vmlinuz-$rel" "$PREFIX/share/vmlinuz-$rel"
+    install -m0644 "$ARTIFACTS/kata-nvkvm.image" "$PREFIX/share/kata-nvkvm.image"
+    ok "installed shim, vmlinuz-$rel and kata-nvkvm.image under $PREFIX"
+
+    # --- 5b. the shim's environment ----------------------------------------
+    # docs/design/07 passed NVKVM_EXTRA_ARGS through a systemd drop-in on
+    # containerd.service.  That is GLOBAL and hard to revert cleanly, and it is
+    # not needed: the shim already defaults to exactly the device we want, and
+    # anything an operator does want to override belongs in a file only the shim
+    # reads.  So this installer does NOT touch containerd.service.
+    install -d /etc/nvkvm-kata
+    if [ ! -e "$SHIM_ENV" ] || ! grep -q "^NVKVM_QEMU=$NVKVM_QEMU_PATH\$" "$SHIM_ENV" 2>/dev/null; then
+        backup_once "$SHIM_ENV"
+        cat > "$SHIM_ENV" <<EOF
+# nvkvm-kata shim environment.  Read by $SHIM_PATH, and by nothing else.
+# Deliberately NOT a containerd.service drop-in: this file affects only the
+# nvkvm-kata runtime, so stock Kata and runc cannot be perturbed by editing it.
+NVKVM_QEMU=$NVKVM_QEMU_PATH
+# NVKVM_EXTRA_ARGS=-device virtio-nvgpu-pci-non-transitional,id=nvkvm0
+# NVKVM_SHIM_LOG=/var/log/nvkvm-shim.log
+EOF
+        # (backup_once already recorded it in the manifest)
+        change "wrote $SHIM_ENV (NVKVM_QEMU=$NVKVM_QEMU_PATH)"
+    else
+        ok "$SHIM_ENV already correct"
+    fi
+
+    # --- 5c. the second Kata configuration ---------------------------------
+    local template
+    if [ -e "$KATA_CONF_DIR/configuration.toml" ]; then template="$(readlink -f "$KATA_CONF_DIR/configuration.toml")"
+    else template="$(stock_kata_config)"; fi
+    log "configuration template: $template"
+
+    local tmp; tmp="$(mktemp)"
+    python3 "$HERE/lib/kata-conf-edit.py" \
+        --in "$template" --out "$tmp" \
+        --set 'hypervisor.qemu:path='"$SHIM_PATH" \
+        --set 'hypervisor.qemu:kernel='"$PREFIX/share/vmlinuz-$rel" \
+        --set 'hypervisor.qemu:image='"$PREFIX/share/kata-nvkvm.image" \
+        --append-list 'hypervisor.qemu:valid_hypervisor_paths='"$SHIM_PATH" \
+        --append-list 'agent.kata:kernel_modules=nvkvm-guest' \
+        --append-words 'hypervisor.qemu:kernel_params=agent.visible_cdi_devices=true' \
+        --comment-out 'hypervisor.qemu:initrd' \
+        || die "failed to derive $NVKVM_CONF from $template" "edit it by hand -- docs/install.md §5c"
+
+    if [ -e "$NVKVM_CONF" ] && cmp -s "$tmp" "$NVKVM_CONF"; then
+        ok "$NVKVM_CONF already correct"
+        rm -f "$tmp"
+    else
+        backup_once "$NVKVM_CONF"
+        install -m0644 "$tmp" "$NVKVM_CONF"; rm -f "$tmp"
+        change "wrote $NVKVM_CONF"
+    fi
+    # Assert what the file must say, rather than trusting the editor.
+    local f
+    for f in "path *= *\"$SHIM_PATH\"" "kernel *= *\"$PREFIX/share/vmlinuz-$rel\"" \
+             "image *= *\"$PREFIX/share/kata-nvkvm.image\"" "kernel_modules *= *\[\"nvkvm-guest\"\]"; do
+        grep -Eq "^ *$f" "$NVKVM_CONF" || die "$NVKVM_CONF is missing: $f" "the config editor did not do its job; edit by hand -- docs/install.md §5c"
+    done
+    grep -q 'agent.visible_cdi_devices=true' "$NVKVM_CONF" \
+        || die "$NVKVM_CONF kernel_params lacks agent.visible_cdi_devices=true" "add it by hand -- docs/install.md §5c"
+    ok "configuration asserted: shim, kernel $rel, nvkvm image, kernel_modules, visible_cdi_devices"
+
+    # --- 5d. the containerd shim wrapper -----------------------------------
+    # THE PER-CONTAINER SELECTION MECHANISM, half one of two.
+    #
+    # containerd derives a shim BINARY NAME from a runtime TYPE by a fixed rule:
+    #   io.containerd.<NAME>.v2  ->  containerd-shim-<NAME>-v2, on containerd's
+    # own PATH.  So "register a new runtime" means "provide a new binary name",
+    # and the binary can be a wrapper around Kata's real shim.  Half two is the
+    # ConfigPath runtime option in stage 6, which is what actually picks the
+    # configuration.
+    #
+    # KATA_CONF_FILE here is a DELIBERATE, DOCUMENTED FALLBACK, not the
+    # mechanism.  MEASURED on Kata 4.1.0: the shim reads the ConfigPath runtime
+    # option first and only consults the environment when no option was passed
+    # (src/runtime/pkg/containerd-shim-v2/create.go:273), and when it does
+    # consult it, isShippedKataConfigPath (:325) accepts ONLY the two hardcoded
+    # default paths and rejects ours:
+    #    invalid KATA_CONF_FILE "/etc/kata-containers/configuration-nvkvm.toml":
+    #    only shipped Kata configuration files are accepted
+    # That is a hardening upstream added after kata-deploy's wrapper idiom was
+    # written, and it means the environment variable can no longer select a
+    # second configuration.  We set it anyway, because the alternative is worse:
+    # a caller that forgets the ConfigPath option would otherwise get the STOCK
+    # configuration SILENTLY -- a container that boots fine and has no GPU.
+    # With the variable set, that caller gets the loud error above, naming the
+    # file.  Wrong-and-loud beats wrong-and-silent.
+    local wrapper="/usr/local/bin/containerd-shim-${RUNTIME_NAME}-v2"
+    local wrapper_body
+    wrapper_body="$(cat <<EOF
+#!/bin/sh
+# containerd-shim-${RUNTIME_NAME}-v2 -- installed by nvkvm-kata-install.sh.
+#
+# containerd derives this filename from the runtime type
+# "io.containerd.${RUNTIME_NAME}.v2".  Existing under this name is most of what
+# it does; the configuration is selected by the ConfigPath runtime option that
+# Docker (daemon.json) and containerd's CRI plugin pass to the shim.
+#
+# KATA_CONF_FILE below is a fallback for a caller that passes no options -- ctr
+# without --runtime-config-path, say.  On Kata 4.1.0 it is REJECTED for a
+# non-shipped path, which is intentional here: it turns "silently ran on the
+# stock configuration with no GPU" into a one-line error naming this file.
+exec env KATA_CONF_FILE=${NVKVM_CONF} ${KATA_ROOT}/bin/containerd-shim-kata-v2 "\$@"
+EOF
+)"
+    if [ ! -e "$wrapper" ] || [ "$(cat "$wrapper")" != "$wrapper_body" ]; then
+        backup_once "$wrapper"
+        printf '%s\n' "$wrapper_body" > "$wrapper"; chmod 0755 "$wrapper"
+        change "wrote $wrapper"
+    else
+        ok "$wrapper already correct"
+    fi
+    ok "runtime type: io.containerd.${RUNTIME_NAME}.v2"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STAGE 6 -- ENGINE.  docs/install.md §6
+# Per-container selection.  Docker is the one the brief asks for; containerd's
+# CRI handler is opt-in because most Docker hosts ship with the CRI plugin
+# disabled and editing a config nobody uses is pure risk.
+# ═════════════════════════════════════════════════════════════════════════════
+stage_engine() {
+    step "stage 6/8  register the runtime with the container engine"
+    local rt="io.containerd.${RUNTIME_NAME}.v2"
+
+    # --- 6a. containerd, bare.  Nothing to configure: `ctr --runtime <type>`
+    #         resolves the binary off containerd's PATH.  Verify that it can.
+    if ! command -v "containerd-shim-${RUNTIME_NAME}-v2" >/dev/null 2>&1; then
+        die "containerd-shim-${RUNTIME_NAME}-v2 is not on PATH" \
+            "run the runtime stage (--only runtime); it installs it into /usr/local/bin"
+    fi
+    ok "ctr/nerdctl:  --runtime $rt  (no configuration needed)"
+
+    # --- 6b. Docker: a named runtime in daemon.json ------------------------
+    if [ "$DOCKER_OK" = 1 ]; then
+        backup_once /etc/docker/daemon.json
+        python3 "$HERE/lib/docker-runtime.py" add --name "$RUNTIME_NAME" --type "$rt" \
+                --config-path "$KATA_CONF_DIR/configuration-nvkvm.toml"
+        case $? in
+            0) change "registered docker runtime '$RUNTIME_NAME' -> $rt in /etc/docker/daemon.json"
+               reload_docker ;;   # backup_once above already recorded it
+            1) ok "docker runtime '$RUNTIME_NAME' already registered" ;;
+            *) die "could not edit /etc/docker/daemon.json" "fix the JSON by hand, then re-run with --only engine" ;;
+        esac
+        docker_has_runtime \
+            || die "docker did not pick up the runtime '$RUNTIME_NAME'" \
+                   "check 'docker info | grep -i runtime' and /etc/docker/daemon.json, then: systemctl restart docker"
+        ok "docker runtime '$RUNTIME_NAME' live -- compose can now say: runtime: $RUNTIME_NAME"
+    else
+        log "docker: SKIPPED (absent, too old, or --no-docker)"
+    fi
+
+    # --- 6c. containerd CRI handler (Kubernetes) ---------------------------
+    if [ "$DO_CRI" = 1 ]; then
+        register_cri "$rt"
+    else
+        log "containerd CRI handler: SKIPPED (pass --containerd-cri for Kubernetes)"
+    fi
+}
+
+# `docker info -f '{{json .Runtimes}}'` prints every runtime's full OCI feature
+# blob -- about 8 KB per runtime -- which is unreadable in a log and pointless
+# here.  Ask for the names only.
+docker_has_runtime() {
+    docker info -f '{{range $k, $v := .Runtimes}}{{$k}}{{"\n"}}{{end}}' 2>/dev/null \
+        | grep -qx "$RUNTIME_NAME"
+}
+
+reload_docker() {
+    # SIGHUP reloads daemon.json's `runtimes` without stopping containers.
+    # Restart only if that did not take -- a restart kills every container on
+    # the host and must not be a routine part of an installer.
+    systemctl reload docker >/dev/null 2>&1 || true
+    for _ in 1 2 3 4 5; do
+        docker_has_runtime && return 0
+        sleep 1
+    done
+    warn "docker did not pick the runtime up on reload; restarting dockerd"
+    systemctl restart docker >/dev/null 2>&1 || die "systemctl restart docker failed" "journalctl -u docker -n50 -- daemon.json may be invalid; the original is in $BACKUP"
+    sleep 2
+}
+
+register_cri() {
+    local rt="$1" cfg=/etc/containerd/config.toml
+    local NVKVM_CONF_PATH="$KATA_CONF_DIR/configuration-nvkvm.toml"
+    local plugin='io.containerd.grpc.v1.cri'
+    [ "${CONTAINERD_MAJOR:-1}" -ge 2 ] 2>/dev/null && plugin='io.containerd.cri.v1.runtime'
+    [ -e "$cfg" ] || { mkdir -p /etc/containerd; containerd config default > "$cfg" 2>/dev/null || : > "$cfg"; }
+    backup_once "$cfg"
+    if grep -q '^# >>> nvkvm-kata >>>' "$cfg"; then ok "containerd CRI handler already present"; return 0; fi
+    cat >> "$cfg" <<EOF
+
+# >>> nvkvm-kata >>>   (remove this block and the marker lines to revert)
+[plugins."$plugin".containerd.runtimes.${RUNTIME_NAME}]
+  runtime_type = "$rt"
+  privileged_without_host_devices = true
+  pod_annotations = ["io.katacontainers.*"]
+  # ConfigPath is what actually selects the nvkvm configuration.  Kata's shim
+  # reads it ahead of KATA_CONF_FILE, and on 4.1.0 the environment route is
+  # rejected for anything but the two shipped default paths.
+  [plugins."$plugin".containerd.runtimes.${RUNTIME_NAME}.options]
+    ConfigPath = "$NVKVM_CONF_PATH"
+# <<< nvkvm-kata <<<
+EOF
+    change "appended a CRI runtime handler '$RUNTIME_NAME' to $cfg"
+    # Say so out loud when the handler cannot possibly be used: the containerd
+    # that ships with Docker sets disabled_plugins = ["cri"], so the stanza
+    # parses, containerd restarts happily, and NOTHING reads it.  That is a
+    # perfectly good "installed but inert" trap.
+    if grep -Eq '^[[:space:]]*disabled_plugins[[:space:]]*=.*"cri"' "$cfg"; then
+        warn "$cfg has disabled_plugins = [\"cri\"] -- the CRI plugin is OFF on this host,"
+        warn "  so the handler just written is INERT.  It is correct and it parses, but nothing"
+        warn "  will use it until you enable the CRI plugin (Docker does not use it at all)."
+    fi
+    systemctl restart containerd >/dev/null 2>&1
+    sleep 2
+    if ! ctr version >/dev/null 2>&1; then
+        warn "containerd did not come back after the config change -- REVERTING it"
+        cp -a "$BACKUP/etc_containerd_config.toml" "$cfg" 2>/dev/null
+        systemctl restart containerd >/dev/null 2>&1; sleep 2
+        die "the CRI stanza broke containerd; it has been reverted" \
+            "run without --containerd-cri, or add the handler by hand -- docs/install.md §6c"
+    fi
+    ok "containerd restarted cleanly with the CRI handler"
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STAGE 7 -- LIBS.  docs/install.md §7
+# The host driver's own userspace, for containers to bind-mount.  Host-specific
+# by construction (it must match the servicing kernel driver exactly), which is
+# why it is an INSTALL step and not a BUILD step -- a prebuilt tarball can never
+# carry it, and the NVIDIA libraries are not redistributable anyway.
+# ═════════════════════════════════════════════════════════════════════════════
+stage_libs() {
+    step "stage 7/8  host driver userspace + the vecadd proof"
+    install -d "$PREFIX/nvidia/lib" "$PREFIX/nvidia/bin"
+
+    local marker="$PREFIX/nvidia/lib/.driver-version"
+    if [ "$FORCE" = 0 ] && [ "$(cat "$marker" 2>/dev/null)" = "$DRIVER_VERSION" ] \
+       && [ -e "$PREFIX/nvidia/lib/libcuda.so.1" ]; then
+        ok "driver bundle already staged for $DRIVER_VERSION"
+    else
+        [ -n "$NVKVM_SRC" ] || resolve_sources
+        [ -x "$NVKVM_SRC/scripts/make_host_bundle.sh" ] || die "no make_host_bundle.sh in $NVKVM_SRC" "pass --nvkvm-src"
+        change "collecting NVIDIA userspace for driver $DRIVER_VERSION"
+        rm -rf "$STATE/hostlibs"; mkdir -p "$STATE/hostlibs"
+        NVKVM_DRIVER_VERSION="$DRIVER_VERSION" bash "$NVKVM_SRC/scripts/make_host_bundle.sh" "$STATE/hostlibs" \
+            || die "make_host_bundle.sh failed" "run it by hand -- docs/install.md §7"
+        local src="$STATE/hostlibs/host-libs-$DRIVER_VERSION"
+        [ -d "$src" ] || die "no $src produced" "make_host_bundle.sh reported success but wrote nothing"
+        rm -rf "$PREFIX/nvidia/lib"; install -d "$PREFIX/nvidia/lib"
+        cp -a "$src"/. "$PREFIX/nvidia/lib/"
+        # SONAME links.  Kata drops CDI's hooks (kata#11169), so NOTHING runs
+        # ldconfig inside the container: libcuda.so.1 has to exist as a name on
+        # disk or every dlopen("libcuda.so.1") fails.
+        local n=0 f so
+        for f in "$PREFIX/nvidia/lib"/*.so.*; do
+            [ -f "$f" ] || continue
+            so="$(objdump -p "$f" 2>/dev/null | awk '/SONAME/{print $2}')"
+            [ -n "$so" ] && [ "$so" != "$(basename "$f")" ] && { ln -sf "$(basename "$f")" "$PREFIX/nvidia/lib/$so"; n=$((n+1)); }
+        done
+        printf '%s' "$DRIVER_VERSION" > "$marker"
+        change "staged $(ls "$PREFIX/nvidia/lib" | wc -l) files, $n SONAME links, driver $DRIVER_VERSION"
+    fi
+    [ -e "$PREFIX/nvidia/lib/libcuda.so.1" ] \
+        || die "no libcuda.so.1 in $PREFIX/nvidia/lib" "the SONAME link pass failed; without it every dlopen in the container fails"
+
+    # nvidia-smi, if the host has one, so a user can sanity-check by hand.
+    if command -v nvidia-smi >/dev/null 2>&1 && [ ! -x "$PREFIX/nvidia/bin/nvidia-smi" ]; then
+        cp -aL "$(command -v nvidia-smi)" "$PREFIX/nvidia/bin/nvidia-smi"
+        change "staged nvidia-smi"
+    fi
+
+    # The proof binary.  Driver API through dlopen with embedded PTX, so it
+    # needs no CUDA toolkit anywhere -- neither on this host nor in the image.
+    if [ "$FORCE" = 1 ] || [ ! -x "$PREFIX/nvidia/bin/vecadd" ] \
+       || [ "$HERE/e2e/vecadd.c" -nt "$PREFIX/nvidia/bin/vecadd" ]; then
+        gcc -O2 -o "$PREFIX/nvidia/bin/vecadd" "$HERE/e2e/vecadd.c" -ldl \
+            || die "could not compile scripts/e2e/vecadd.c" "install gcc, or build it by hand -- docs/install.md §7"
+        change "built $PREFIX/nvidia/bin/vecadd"
+    else
+        ok "vecadd already built"
+    fi
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STAGE 8 -- VERIFY.  docs/install.md §8
+# "Installed" and "working" are different claims.  This stage RUNS THE PROOF.
+# It also runs the two negative/regression controls, because an installer that
+# breaks the host's existing runtimes has not succeeded either.
+# ═════════════════════════════════════════════════════════════════════════════
+VERIFY_FAILED=0
+verify_fail() { printf '[nvkvm-kata]  FAIL  %s\n' "$*" >&2; VERIFY_FAILED=1; }
+verify_pass() { printf '[nvkvm-kata]  PASS  %s\n' "$*" >&2; }
+
+stage_verify() {
+    step "stage 8/8  verify -- running the real proof, not a file listing"
+    local rel; rel="$(cat "$ARTIFACTS/release" 2>/dev/null || echo '')"
+    local img=docker.io/library/ubuntu:24.04
+    local out
+
+    if [ "$DOCKER_OK" = 1 ]; then
+        docker pull -q "$img" >/dev/null 2>&1 || warn "could not pull $img"
+
+        # control 1: runc still works.  If we broke daemon.json this fails.
+        if out="$(docker run --rm "$img" /bin/true 2>&1)"; then verify_pass "control: runc still runs containers"
+        else verify_fail "control: runc is BROKEN after install -- $out"; fi
+
+        # the guest is ours: uname must be the kernel we built.
+        if out="$(run_nvkvm docker "$img" /bin/sh -c 'uname -r' 2>&1)"; then
+            if [ -n "$rel" ] && printf '%s' "$out" | grep -q "$rel"; then
+                verify_pass "guest kernel is $rel (the nvkvm-kata configuration was selected, not the stock one)"
+            else
+                verify_fail "guest kernel is '$out', expected $rel -- KATA_CONF_FILE did not reach the shim"
+            fi
+        else
+            verify_fail "could not start a container on runtime $RUNTIME_NAME: $out"
+        fi
+
+        # the module loaded and registered its char devices.
+        if out="$(run_nvkvm docker "$img" /bin/sh -c 'grep -E "nvidia|nvidia-uvm" /proc/devices' 2>&1)"; then
+            printf '%s' "$out" | grep -q nvidiactl \
+                && verify_pass "nvkvm-guest.ko loaded: $(printf '%s' "$out" | tr '\n' ' ')" \
+                || verify_fail "no nvidia char devices in the guest -- module did not load: $out"
+        else
+            verify_fail "device probe failed: $out"
+        fi
+
+        # THE PROOF.
+        log "running the CUDA vector-add in a container on runtime '$RUNTIME_NAME'..."
+        if out="$(run_nvkvm docker "$img" /usr/local/nvidia/bin/vecadd 2>&1)"; then
+            printf '%s\n' "$out" | sed 's/^/[nvkvm-kata]      | /' >&2
+            printf '%s' "$out" | grep -q 'VECADD OK' \
+                && verify_pass "CUDA vector-add ran on the GPU, in a container, in a Kata VM, through nvkvm" \
+                || verify_fail "vecadd ran but did not print VECADD OK"
+        else
+            printf '%s\n' "$out" | sed 's/^/[nvkvm-kata]      | /' >&2
+            verify_fail "vecadd did not run"
+        fi
+    else
+        # ctr fallback -- same three checks, one tool down.
+        ctr images pull "$img" >/dev/null 2>&1 || warn "could not pull $img with ctr"
+        if out="$(run_nvkvm ctr "$img" /bin/sh -c 'uname -r' 2>&1)"; then
+            [ -n "$rel" ] && printf '%s' "$out" | grep -q "$rel" \
+                && verify_pass "guest kernel is $rel" || verify_fail "guest kernel '$out' != $rel"
+        else verify_fail "could not start a container: $out"; fi
+        if out="$(run_nvkvm ctr "$img" /usr/local/nvidia/bin/vecadd 2>&1)"; then
+            printf '%s\n' "$out" | sed 's/^/[nvkvm-kata]      | /' >&2
+            printf '%s' "$out" | grep -q 'VECADD OK' && verify_pass "CUDA vector-add ran" || verify_fail "no VECADD OK"
+        else printf '%s\n' "$out" | sed 's/^/[nvkvm-kata]      | /' >&2; verify_fail "vecadd did not run"; fi
+    fi
+
+    # the host never lost the card -- the entire point of nvkvm.
+    if [ -r /proc/driver/nvidia/gpus ] || ls /sys/bus/pci/drivers/nvidia/0000:* >/dev/null 2>&1; then
+        verify_pass "host driver still bound to the GPU (no VFIO, no unbind)"
+    else
+        warn "could not confirm the host driver is still bound (this is informational)"
+    fi
+
+    if [ "$VERIFY_FAILED" != 0 ]; then
+        die "VERIFICATION FAILED -- nvkvm-kata is installed but NOT working" \
+            "read the failures above; 'journalctl -t kata -n200' and NVKVM_SHIM_LOG in $SHIM_ENV are the next places to look. Revert with scripts/nvkvm-kata-uninstall.sh"
+    fi
+}
+
+run_nvkvm() {   # engine image command...
+    local engine="$1" image="$2"; shift 2
+    if [ "$engine" = docker ]; then
+        timeout 180 docker run --rm --runtime "$RUNTIME_NAME" \
+            -v "$PREFIX/nvidia/lib:/usr/local/nvidia/lib:ro" \
+            -v "$PREFIX/nvidia/bin:/usr/local/nvidia/bin:ro" \
+            -e VISIBLE_CDI_DEVICES=nvidia.com/gpu=0 \
+            -e LD_LIBRARY_PATH=/usr/local/nvidia/lib \
+            "$image" "$@"
+    else
+        timeout 180 ctr run --rm --runtime "io.containerd.${RUNTIME_NAME}.v2" \
+            --runtime-config-path "$KATA_CONF_DIR/configuration-nvkvm.toml" \
+            --mount "type=bind,src=$PREFIX/nvidia/lib,dst=/usr/local/nvidia/lib,options=rbind:ro" \
+            --mount "type=bind,src=$PREFIX/nvidia/bin,dst=/usr/local/nvidia/bin,options=rbind:ro" \
+            --env VISIBLE_CDI_DEVICES=nvidia.com/gpu=0 \
+            --env LD_LIBRARY_PATH=/usr/local/nvidia/lib \
+            "$image" "nvkvm-verify-$$" "$@"
+    fi
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+main() {
+    preflight
+    want kata    && stage_kata
+    want qemu    && stage_qemu
+    want kernel  && stage_kernel
+    want rootfs  && stage_rootfs
+    want runtime && stage_runtime
+    want engine  && stage_engine
+    want libs    && stage_libs
+    want verify  && stage_verify
+
+    step "done"
+    cat >&2 <<EOF
+[nvkvm-kata]
+[nvkvm-kata]   Select it per container.  Nothing global changed:
+[nvkvm-kata]
+[nvkvm-kata]     services:
+[nvkvm-kata]       cuda:
+[nvkvm-kata]         image: ubuntu:24.04
+[nvkvm-kata]         runtime: $RUNTIME_NAME
+[nvkvm-kata]         environment:
+[nvkvm-kata]           VISIBLE_CDI_DEVICES: nvidia.com/gpu=0
+[nvkvm-kata]           LD_LIBRARY_PATH: /usr/local/nvidia/lib
+[nvkvm-kata]         volumes:
+[nvkvm-kata]           - $PREFIX/nvidia/lib:/usr/local/nvidia/lib:ro
+[nvkvm-kata]
+[nvkvm-kata]   (examples/docker-compose.yml is this, ready to run.)
+[nvkvm-kata]   Revert everything:  scripts/nvkvm-kata-uninstall.sh
+EOF
+}
+main "$@"
