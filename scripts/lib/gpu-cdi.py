@@ -68,6 +68,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import struct
 import subprocess
 import sys
@@ -75,6 +76,20 @@ import tempfile
 import time
 
 DEFAULT_MANIFEST = "/var/lib/nvkvm-kata/gpu-mounts.json"
+
+# THE TOOLKIT FLOOR, and why there is a floor rather than a pin.
+#
+# We call the host's own `nvidia-ctk`, never a bundled copy, and that is
+# deliberate: new driver releases ship new libraries, and it is the toolkit's
+# discovery that knows their names.  A pin would freeze exactly the thing that
+# has to stay current, and would buy no reproducibility worth having -- the
+# libraries it finds are the host's either way.  It also costs nothing to
+# depend on, because Docker already refuses `--gpus` without
+# nvidia-container-runtime-hook, which ships in the same package.
+#
+# So: no ceiling, but a floor, determined by running the real thing rather than
+# guessed.  See docs/install.md §7 for the version-by-version test.
+MIN_TOOLKIT = "1.14.6"
 NVIDIA_VISIBLE_DEVICES = "NVIDIA_VISIBLE_DEVICES"
 NVIDIA_DRIVER_CAPABILITIES = "NVIDIA_DRIVER_CAPABILITIES"
 VISIBLE_CDI_DEVICES = "VISIBLE_CDI_DEVICES"
@@ -191,12 +206,118 @@ def read_soname(path):
 
 # ── discover ─────────────────────────────────────────────────────────────────
 def driver_version():
+    """The host driver version, from /proc, for both kernel-module flavours.
+
+    Take the first dotted number, NOT the token after "Kernel Module": the open
+    module writes "... Open Kernel Module for x86_64  580.95.05 ..." and the
+    proprietary one writes "... x86_64 Kernel Module  575.51.03 ...", so
+    anchoring on the words yields "for" on an open-module host.  This must stay
+    byte-identical to the installer's rule -- `inject` compares its result
+    against the manifest on every container start.
+    """
     try:
         with open("/proc/driver/nvidia/version") as f:
-            m = re.search(r"Kernel Module\s+(\S+)", f.read())
-            return m.group(1) if m else None
+            m = re.search(r"\d+\.\d+(?:\.\d+)+", f.read())
+            return m.group(0) if m else None
     except OSError:
         return None
+
+
+def parse_version(text):
+    """First dotted numeric run in a version string -> tuple of ints."""
+    m = re.search(r"(\d+(?:\.\d+)+)", text or "")
+    return tuple(int(x) for x in m.group(1).split(".")) if m else None
+
+
+def toolkit_version(exe):
+    """(version_tuple, raw_string) for an nvidia-ctk, or (None, raw)."""
+    try:
+        p = subprocess.run([exe, "--version"], capture_output=True, text=True)
+        raw = ((p.stdout or "") + (p.stderr or "")).strip()
+    except OSError:
+        return None, ""
+    return parse_version(raw), raw
+
+
+def check_shape(spec, exe, raw_version):
+    """Assert the CDI spec has the fields we actually consume, non-empty.
+
+    A version floor alone is not enough: a toolkit can be new enough and still
+    produce an empty spec (no driver loaded, a container without the device
+    nodes, a partially installed driver).  Both failures look identical later
+    on -- a GPU container with no libraries and no error -- so both are caught
+    here, at install time, where there is a human to read the message.
+    """
+    problems = []
+    edits = spec.get("containerEdits")
+    if not isinstance(edits, dict):
+        problems.append("no top-level containerEdits object")
+        edits = {}
+    mounts = edits.get("mounts")
+    if not mounts:
+        problems.append("containerEdits.mounts is empty -- no driver libraries were discovered")
+    else:
+        for m in mounts:
+            if not m.get("hostPath") or not (m.get("containerPath") or m.get("hostPath")):
+                problems.append("a mount entry has no hostPath/containerPath")
+                break
+        names = {os.path.basename(m.get("containerPath") or m.get("hostPath") or "")
+                 for m in mounts}
+        if not any(n.startswith("libcuda.so.") for n in names):
+            problems.append("no libcuda.so.* among the mounts -- this spec cannot run CUDA")
+        if not any(n == "nvidia-smi" for n in names):
+            problems.append("nvidia-smi is not among the mounts")
+    if not spec.get("devices"):
+        problems.append("the spec declares no devices")
+    if not problems:
+        return
+    die("`%s cdi generate` produced a spec this installer cannot use:\n    - %s"
+        % (exe, "\n    - ".join(problems)),
+        "toolkit version: %s.  Check that the NVIDIA driver is loaded and "
+        "complete (`nvidia-smi`, `ls /dev/nvidia*`), then re-run.  Inspect the "
+        "raw spec with: %s cdi generate --format=json" % (raw_version or "unknown", exe))
+
+
+def userspace_versions():
+    """Driver versions visible as libcuda.so.<v> on this host."""
+    out = set()
+    for d in ("/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib"):
+        try:
+            for n in os.listdir(d):
+                m = re.match(r"libcuda\.so\.(\d+\.\d+(?:\.\d+)?)$", n)
+                if m:
+                    out.add(m.group(1))
+        except OSError:
+            continue
+    return out
+
+
+def check_driver_consistency():
+    """Catch the classic 'Driver/library version mismatch' host, by name.
+
+    A package upgrade replaces the driver's USERSPACE on disk while the running
+    KERNEL MODULE stays at the old version until reboot.  Everything NVIDIA
+    then fails, with errors that describe the symptom rather than the cause --
+    `nvidia-smi` says "Failed to initialize NVML", `nvidia-ctk` says "failed to
+    construct device spec generators".  Seen for real 2026-08-28, when
+    unattended-upgrades installed 580.173.02 over a running 580.95.05 in the
+    middle of an install.
+    """
+    live = driver_version()
+    disk = userspace_versions()
+    if not live or not disk:
+        return
+    # Compare on the first two components: NVIDIA ships libcuda.so.580.173.02
+    # against module 580.173.02, but some distros truncate the patch level.
+    short = lambda v: ".".join(v.split(".")[:2])
+    if short(live) in {short(d) for d in disk} or live in disk:
+        return
+    die("this host has a driver/library version mismatch: the loaded kernel "
+        "module is %s but the userspace on disk is %s"
+        % (live, ", ".join(sorted(disk))),
+        "a package upgrade replaced the driver without reloading the module. "
+        "Reboot, or unload and reload the nvidia modules, then re-run. "
+        "`nvidia-smi` will fail on this host too, for any runtime.")
 
 
 def run_nvidia_ctk():
@@ -213,6 +334,16 @@ def run_nvidia_ctk():
         die("nvidia-ctk not found",
             "install nvidia-container-toolkit -- Docker also needs it before "
             "`docker run --gpus` will work at all")
+    ver, raw = toolkit_version(exe)
+    floor = tuple(int(x) for x in MIN_TOOLKIT.split("."))
+    if ver is None:
+        warn("could not parse a version out of `%s --version` (%r); continuing"
+             % (exe, raw))
+    elif ver < floor:
+        die("nvidia-container-toolkit %s is too old (need >= %s)"
+            % (".".join(map(str, ver)), MIN_TOOLKIT),
+            "upgrade it: this is the oldest release whose `cdi generate` output "
+            "this installer was tested against -- docs/install.md #7")
     with tempfile.NamedTemporaryFile(suffix=".json") as tmp:
         p = subprocess.run(
             [exe, "cdi", "generate", "--format=json", "--output=" + tmp.name],
@@ -221,7 +352,9 @@ def run_nvidia_ctk():
             die("`%s cdi generate` failed (rc=%d)" % (exe, p.returncode),
                 (p.stderr or "").strip().splitlines()[-1] if p.stderr else None)
         with open(tmp.name) as f:
-            return json.load(f), exe, (p.stderr or "")
+            spec = json.load(f)
+    check_shape(spec, exe, raw)
+    return spec, exe, raw
 
 
 def hook_args(spec, hook_name):
@@ -239,6 +372,7 @@ def discover(out_path, force):
     ver = driver_version()
     if ver is None:
         die("no /proc/driver/nvidia/version", "the NVIDIA driver is not loaded on this host")
+    check_driver_consistency()
     if not force and os.path.exists(out_path):
         try:
             with open(out_path) as f:
@@ -250,10 +384,11 @@ def discover(out_path, force):
         except (OSError, ValueError):
             pass
 
-    spec, exe, stderr = run_nvidia_ctk()
+    spec, exe, tk_raw = run_nvidia_ctk()
     edits = spec.get("containerEdits") or {}
 
     mounts = []          # [{source, destination, options}]
+    skipped = []         # [{source, destination, why, reason}]
     seen_dest = set()
 
     def add(src, dst, options, why):
@@ -262,6 +397,38 @@ def discover(out_path, force):
             return
         if not os.path.exists(src):
             warn("skipping %s: host path %s does not exist" % (dst, src))  # discover only
+            skipped.append({"source": src, "destination": dst, "why": why,
+                            "reason": "host path does not exist"})
+            return
+        # ONLY REGULAR FILES AND DIRECTORIES CROSS THE VM BOUNDARY.
+        #
+        # Kata shares an OCI mount by bind-mounting it into the sandbox's
+        # shared directory and exporting that over virtio-fs.  A socket, a
+        # FIFO or a device node cannot be carried that way, and the failure is
+        # not a warning -- the agent aborts createContainer with a bare
+        #     Input/output error (os error 5)
+        # and a stack of <unknown> frames that names nothing.
+        #
+        # This is not hypothetical: nvidia-container-toolkit 1.18.0's IPC
+        # discoverer emits /run/nvidia-persistenced/socket, which is a UNIX
+        # socket, and it made every GPU container on the runtime fail to start.
+        # MEASURED 2026-08-28 on driver 580.95.05 / toolkit 1.18.0; toolkit
+        # 1.17.1 on another host did not emit it, which is exactly why this is
+        # filtered by KIND rather than by name.
+        try:
+            st = os.stat(src)          # follow symlinks: the target is what gets bound
+        except OSError as e:
+            skipped.append({"source": src, "destination": dst, "why": why,
+                            "reason": "stat failed: %s" % e})
+            return
+        if not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
+            kind = ("socket" if stat.S_ISSOCK(st.st_mode) else
+                    "fifo" if stat.S_ISFIFO(st.st_mode) else
+                    "char device" if stat.S_ISCHR(st.st_mode) else
+                    "block device" if stat.S_ISBLK(st.st_mode) else "not a regular file")
+            warn("skipping %s: %s is a %s and cannot cross virtio-fs" % (dst, src, kind))
+            skipped.append({"source": src, "destination": dst, "why": why,
+                            "reason": "%s -- cannot cross virtio-fs" % kind})
             return
         seen_dest.add(dst)
         mounts.append({"source": os.path.realpath(src), "destination": dst,
@@ -317,6 +484,34 @@ def discover(out_path, force):
             if a == "--folder":
                 ldcache_folders.append(next(it, ""))
 
+    # THE CROSS-DISTRO CASE, and why these folders are not just informational.
+    #
+    # The mounts land at the HOST's paths.  On a Debian/Ubuntu host that is
+    # /usr/lib/x86_64-linux-gnu, which is also a default library directory in
+    # most containers, so everything resolves by luck.  On a RHEL host it is
+    # /usr/lib64 -- and in an Ubuntu container /usr/lib64 is not searched, not
+    # in ld.so.conf, and not built in.  MEASURED on RHEL 9.5, 2026-08-28:
+    # libcuda.so.1 sitting in /usr/lib64 inside an ubuntu:24.04 container, and
+    # `ldconfig -p | grep libcuda` completely empty.
+    #
+    # NVIDIA solves this by passing these same --folder arguments to its
+    # update-ldcache hook, which writes them into the container's ld.so.conf
+    # before running ldconfig.  We cannot pass arguments to a hook that lives in
+    # the guest -- but we do not need to.  A .conf file is just a file, and we
+    # already have a way to put a file in the container: mount it.  ldconfig
+    # then finds it by itself.
+    if ldcache_folders:
+        conf_dir = os.path.dirname(out_path) or "."
+        conf = os.path.join(conf_dir, "nvkvm-nvidia-ld.conf")
+        os.makedirs(conf_dir, exist_ok=True)
+        with open(conf, "w") as f:
+            f.write("# Written by nvkvm-kata's gpu-cdi.py -- the directories the host\n"
+                    "# NVIDIA driver's libraries are mounted into.  Read by ldconfig,\n"
+                    "# which the guest-side CDI hook runs at container create.\n")
+            for d in ldcache_folders:
+                f.write(d + "\n")
+        add(conf, "/etc/ld.so.conf.d/nvkvm-nvidia.conf", ro, "ldconfig search path")
+
     # index -> uuid, so that `--gpus '"device=GPU-<uuid>"'` can be answered.
     uuids = {}
     try:
@@ -333,8 +528,10 @@ def discover(out_path, force):
         "driver_version": ver,
         "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "generator": "%s cdi generate" % exe,
+        "toolkit_version": tk_raw.splitlines()[0] if tk_raw else "unknown",
         "cdi_kind": spec.get("kind"),
         "mounts": mounts,
+        "skipped": skipped,
         "symlinks": symlinks,
         "ldcache_folders": ldcache_folders,
         "gpu_uuid_to_index": uuids,
@@ -350,11 +547,14 @@ def discover(out_path, force):
         json.dump(manifest, f, indent=2, sort_keys=True)
         f.write("\n")
     os.replace(tmp, out_path)
+    for sk in skipped:
+        log("discover: skipped %s (%s)" % (sk["destination"], sk["reason"]))
     nsoname = sum(1 for m in mounts if m["why"].startswith("SONAME"))
     print("gpu-cdi: driver %s -> %d mounts (%d from nvidia-ctk, %d SONAME names, "
-          "%d named links) -> %s"
+          "%d named links%s) -> %s"
           % (ver, len(mounts), sum(1 for m in mounts if m["why"] == "nvidia-ctk mount"),
              nsoname, sum(1 for m in mounts if m["why"].startswith("create-symlinks")),
+             ("; %d skipped, see \"skipped\" in the manifest" % len(skipped)) if skipped else "",
              out_path))
     return 0
 
@@ -430,6 +630,18 @@ def inject(bundle, manifest_path):
     cdi = visible_to_cdi(want.strip(), man.get("gpu_uuid_to_index") or {})
     env[:] = [e for e in env if not e.startswith(VISIBLE_CDI_DEVICES + "=")]
     env.append(VISIBLE_CDI_DEVICES + "=" + cdi)
+
+    # The manifest can go stale WITHOUT the driver version changing -- a
+    # package upgrade can replace the files while the module keeps running.
+    # Kata's report of that is "Could not resolve symlink for source <path>",
+    # which does not say what to do about it.  Stat-ing 80 paths costs about a
+    # millisecond, once per container, and turns it into a sentence.
+    gone = [m["source"] for m in man["mounts"] if not os.path.exists(m["source"])]
+    if gone:
+        die("%d of the %d driver files in %s no longer exist (first: %s)"
+            % (len(gone), len(man["mounts"]), manifest_path, gone[0]),
+            "the host driver's userspace changed after the manifest was built. "
+            "Re-run: nvkvm-kata-gpu-cdi discover --force")
 
     # (2)+(4): the libraries, and the names they have to be reachable under.
     mounts = cfg.setdefault("mounts", [])

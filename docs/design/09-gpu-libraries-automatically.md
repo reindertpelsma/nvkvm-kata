@@ -418,25 +418,96 @@ and silently mounts the whole disk instead of the partition —
 
 ---
 
-## 9. The test host
+## 8b. What fresh hosts found that one host could not
+
+[§9](#9-the-test-hosts) lists them. Four defects only appear when the host is
+not the one you developed on, and all four were silent or misattributed.
+
+**1. The library list can contain things that are not files.**
+nvidia-container-toolkit **1.18.0** discovers `/run/nvidia-persistenced/socket`
+— a UNIX socket. Kata shares an OCI mount by bind-mounting it into the sandbox's
+shared directory and exporting that over virtio-fs, and a socket cannot travel
+that way. Every GPU container on the runtime then failed to start with
+
+```
+failed to create shim task: Input/output error (os error 5)
+```
+
+and a stack of `<unknown>` frames naming nothing. Toolkit 1.17.1 on another host
+did not emit it, which is exactly why `discover` now filters by **kind**
+(`S_ISREG || S_ISDIR`) rather than by name, and records what it dropped in the
+manifest's `skipped` list.
+
+**2. The host's library directory is not necessarily a library directory in the
+container.** On Debian/Ubuntu hosts the driver lives in
+`/usr/lib/x86_64-linux-gnu`, which most containers also search — so everything
+resolved by luck. On **RHEL** it is `/usr/lib64`, and in an `ubuntu:24.04`
+container `/usr/lib64` is searched by nothing: `ldconfig -p | grep libcuda` came
+back completely empty with `libcuda.so.1` sitting right there, and the CUDA proof
+failed on `dlopen`. NVIDIA solves this by passing `--folder` arguments to its
+`update-ldcache` hook. We cannot pass arguments to a hook that lives in the
+guest — but a `.conf` file is just a file, and we already have a way to put a
+file in a container. `discover` now writes the folder list and mounts it at
+`/etc/ld.so.conf.d/nvkvm-nvidia.conf`; the guest hook's `ldconfig` finds it
+unaided. **This is the case that makes the ldcache hook load-bearing rather than
+merely tidy**, and it only shows up when host and container distributions differ.
+
+**3. A driver upgrade under a running host produces two different lies.**
+`unattended-upgrades` installed 580.173.02 over a running 580.95.05 mid-install.
+Everything NVIDIA then reports the symptom rather than the cause — `nvidia-smi`
+says "Failed to initialize NVML", `nvidia-ctk` says "failed to construct device
+spec generators", Kata says "Could not resolve symlink for source". `discover`
+now compares the loaded kernel module against the userspace on disk and says
+*"driver/library version mismatch … reboot"*; `inject` stats the manifest's
+sources on every container and says *"re-run discover --force"* if they moved.
+
+**4. Version parsing must not anchor on words.** The open kernel module writes
+`NVIDIA UNIX Open Kernel Module for x86_64  580.95.05`; the proprietary one
+writes `NVIDIA UNIX x86_64 Kernel Module  575.51.03`. Anchoring on "Kernel
+Module" yields the string `for` on every open-module host, and the installer
+died on a perfectly good driver. Both the shell and the Python now take the
+first dotted number, and the two rules are asserted to agree because `inject`
+compares their outputs on every container start.
+
+### And one check that passed green while broken
+
+`ldd /usr/bin/nvidia-smi | grep -c "not found"` was the "are the libraries
+complete" check. It reports nothing missing even when the loader cannot find a
+single NVIDIA library, because `nvidia-smi` **dlopen()s** libnvidia-ml rather
+than linking it. It passed on the RHEL host where `libcuda.so.1` was
+unreachable. The check now asks the loader the question the workload will ask:
+is `libcuda.so.1` in the container's ldcache.
+
+## 9. The test hosts
 
 Same shape as [07 §9](07-end-to-end.md#9-the-test-host), different rental.
 
-| | |
-|---|---|
-| machine | vast.ai KVM instance, **NVIDIA RTX 4070 Ti SUPER**, 42 vCPU, 198 GB RAM |
-| host OS | Ubuntu 22.04.5, `systemd-detect-virt` = `kvm`, cgroup v2 |
-| host driver | 575.51.03 |
-| nvidia-container-toolkit | preinstalled on the image (`nvidia-ctk`, `nvidia-container-cli`, `nvidia-container-runtime-hook` all present) |
-| containerd / docker | `containerd.io 1.7.27` / `28.1.1` |
-| Kata | 4.1.0, both tarballs, installed by the script |
-| guest kernel | `6.18.35-nvkvm` |
-| images | `nvidia/cuda:13.3.1-cudnn-devel-ubuntu26.04`, `nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04`, `ubuntu:24.04` |
+Three, deliberately unlike each other. All vast.ai KVM instances
+(`systemd-detect-virt` = `kvm`, cgroup v2), Kata 4.1.0, guest kernel
+`6.18.35-nvkvm`.
 
-**One GPU, one architecture, one driver, one container engine.** Ada (AD103),
-575.51.03, Docker. Nothing here says anything about multi-GPU, about
+| | A (the original) | B (fresh) | C (fresh) |
+|---|---|---|---|
+| OS | Ubuntu 22.04.5 | Ubuntu 22.04.5 | **RHEL 9.5**, SELinux **enforcing** |
+| GPU | RTX 4070 Ti SUPER (Ada) | RTX 4070 Ti SUPER (Ada) | **RTX 3090** (Ampere) |
+| driver | 575.51.03 | **580.173.02, open module** | **560.35.03** |
+| toolkit | 1.17.x | **1.20.0** (1.14.6–1.20.0 matrixed) | **1.17.1** |
+| containerd | 1.7.27 | **2.1.5** | 1.7.23 |
+| docker | 28.1.1 | **29.0.3** | 27.3.1 |
+| library dir | `/usr/lib/x86_64-linux-gnu` | same | **`/usr/lib64`** |
+| result | PASS | **PASS**, and PASS again with Docker ignored (`ctr` only) | **PASS** |
+
+Images used: `nvidia/cuda:13.3.1-cudnn-devel-ubuntu26.04`,
+`nvidia/cuda:12.9.1-cudnn-devel-ubuntu24.04`, `ubuntu:24.04`.
+
+**SELinux is no longer an open question in the way [07 §9](07-end-to-end.md#9-the-test-host)
+left it** — host C ran the whole stack with SELinux *enforcing*. That is one
+host, not a survey, and nothing here was tuned for it.
+
+**Still one GPU per host.** Nothing here says anything about multi-GPU, about
 Kubernetes/CRI (which passes the same OCI spec through the same shim wrapper and
-*should* work identically — **UNVERIFIED**), or about a SELinux-enforcing node.
+*should* work identically — **UNVERIFIED**), or about Arch as a host
+([install §0](../install.md#which-distributions-this-works-on)).
 
 ---
 

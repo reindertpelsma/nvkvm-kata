@@ -181,6 +181,48 @@ command -v yq || ( cd /root/kata-containers && INSTALL_IN_GOPATH=false ./ci/inst
 Kata ships that installer and it pins the version Kata expects; use it rather
 than a distro package.
 
+
+### Which distributions this works on
+
+Dependencies are checked by **command** and by **header**, never by package
+name — "is there a `gcc`" is the same question everywhere — so there is one
+check list and one translation table (`pkg_for()` in the installer). Families,
+not distributions: `ID_LIKE` from `/etc/os-release` decides, so Mint, Manjaro,
+Rocky and Alma fall out for free.
+
+| family | detected as | packages via | status |
+|---|---|---|---|
+| Debian / Ubuntu | `debian` | `apt-get` | **installed and verified end to end** — Ubuntu 22.04, driver 580.173.02 (open module), toolkit 1.20.0, Docker 29.0.3 + containerd 2.1.5 |
+| Red Hat / Fedora / Rocky / Alma | `rhel` | `dnf` | **installed and verified end to end** — RHEL 9.5, SELinux **enforcing**, driver 560.35.03, toolkit 1.17.1, Docker 27.3.1 + containerd 1.7.23 |
+| Arch | `arch` | `pacman` | **partially verified** — see below |
+| anything else | `unknown` | — | preflight says so and refuses `--install-deps`; a fully pre-provisioned host still installs |
+
+**What "partially verified" means for Arch, precisely.** There is no Arch KVM
+image on the rental provider used here, so no Arch *host* with a GPU and
+`/dev/kvm` existed to install on. In an Arch container on a GPU host, these
+passed: distro detection, the whole `pacman` dependency path, the Kata install,
+the nvkvm QEMU build, and the guest kernel + `nvkvm-guest.ko` build with
+`depmod`. These were **not** run on Arch: the guest-rootfs stage (needs
+loop-device partition scanning, which a container cannot do), runtime and engine
+registration (needs systemd), and the verify stage. Those stages are
+distro-neutral file operations, but that is an argument and not a measurement,
+and it is recorded here as one.
+
+Two package names differ enough to be worth naming, because both were found by
+running it rather than by reading:
+
+- **`xxd`** is `xxd` on Debian/Ubuntu, **`tinyxxd`** on Arch (there is no Arch
+  package called `xxd`), and `vim-common` on RHEL.
+- **EL9 hides build packages in `CRB`** (`powertools` on EL8), disabled by
+  default: `ninja-build`, `meson` and `libslirp-devel` all live there. The
+  installer enables it. RHEL 9 also ships Python 3.9, which has no `tomllib`,
+  so QEMU 11's configure needs `python3-tomli`.
+
+**Docker is not required.** containerd is the baseline. A Kubernetes node or a
+podman host has containerd and no Docker, and the install — including its
+CUDA proof — runs through `ctr` there. Docker, when present, gets a named
+runtime in `daemon.json` as well.
+
 ## 1. Kata Containers
 
 **Both tarballs.** `kata-static` carries the guest assets and the VMMs;
@@ -559,11 +601,61 @@ calls the other half:
 which edits the OCI `config.json` containerd has just written into the bundle.
 If the container did not ask for a GPU it does nothing at all.
 
-**`nvidia-container-toolkit` must be installed on the host.** That is not a new
-dependency: Docker only registers its `nvidia` device driver when
-`nvidia-container-runtime-hook` is on `PATH`, so without the toolkit
-`docker run --gpus all` fails with *"could not select device driver"* whatever
-runtime you name. `--install-deps` will install it.
+### The toolkit dependency: required, not installed, not pinned
+
+Three decisions, recorded here so they are not relitigated.
+
+**1. `nvidia-container-toolkit` is REQUIRED.** `nvidia-ctk` is what answers
+"which files on this host are driver files", and nothing else can: that list
+changes with every driver release and NVIDIA is the only party who tracks it.
+
+**2. This installer does NOT install it.** Setting up NVIDIA's package
+repository on someone else's host is invasive, and it is the single most
+distro-divergent piece of work in the whole install — three repo mechanisms,
+three key-handling schemes, and an Arch package that comes from `[extra]`
+instead of from NVIDIA at all. Preflight detects the toolkit and, if it is
+missing, **fails loudly with the exact command for the detected family**. This
+costs a GPU operator nothing: a host that runs GPU containers already has the
+toolkit.
+
+**3. The version is NOT pinned, but it has a floor.** We call whatever
+`nvidia-ctk` is installed on the host. That is the point — new driver releases
+ship new libraries, and it is the toolkit's *current* discovery that knows their
+names. Pinning would freeze exactly the thing that has to stay fresh, and would
+buy no reproducibility worth having, since the libraries it finds are the host's
+either way. What is enforced instead is the same posture the toolkit takes
+toward the driver:
+
+- **a minimum version, `1.14.6`** (`MIN_TOOLKIT` in `scripts/lib/gpu-cdi.py`) —
+  the oldest release whose `cdi generate` output was actually consumed
+  correctly, **determined by installing each one and running it**, not guessed.
+  Every version from 1.14.6 to 1.20.0 was tested for output shape, and 1.14.6
+  was additionally taken end to end to a passing CUDA workload. 1.13.5 could not
+  be installed on the test host (the package set changed before 1.14) and is
+  therefore untested and excluded by the floor rather than assumed broken.
+- **a shape check on every `discover`** — the spec must carry a non-empty
+  `containerEdits.mounts`, a `libcuda.so.*`, an `nvidia-smi`, and at least one
+  device, or the install fails naming what was missing. A version floor alone is
+  not enough: a new-enough toolkit on a half-installed driver produces an empty
+  spec, and both failures otherwise look identical later on — a GPU container
+  with no libraries and no error.
+
+What the versions actually differ in, measured on one host (driver 580.173.02):
+
+| toolkit | mounts | `create-symlinks` | SONAME | usable |
+|---|---|---|---|---|
+| 1.14.6 | 68 | 1 | 20 | yes — **and verified end to end**, CUDA included |
+| 1.15.0 | 68 | 1 | 20 | yes |
+| 1.16.0, 1.16.2 | 71 | 2 | 21 | yes |
+| 1.17.0, 1.17.8 | 76 | 5 | 22 | yes |
+| 1.18.0, 1.19.1 | 85 | 14 | 22 | yes |
+| 1.20.0 | 88 | 15 | 22 | yes — **and verified end to end** |
+| 1.13.5 | — | — | — | **untested**: its package set predates `nvidia-container-toolkit-base` and the install hangs in dpkg on the test host. Excluded by the floor rather than assumed broken |
+
+Raw output: [`docs/design/evidence/10/toolkit-versions.log`](design/evidence/10/toolkit-versions.log).
+
+The list grows because NVIDIA adds libraries. That is precisely the thing a pin
+would have frozen.
 
 ### What it does, and why each piece exists
 
@@ -691,6 +783,13 @@ Transcript: [`docs/design/evidence/09/acceptance.log`](design/evidence/09/accept
 | `invalid KATA_CONF_FILE …: only shipped Kata configuration files are accepted` | no `ConfigPath` option was passed. Docker: §6b's `options`. `ctr`: `--runtime-config-path`. CRI: §6c |
 | no `/dev/nvidia*` in the container | no `--gpus` and no `NVIDIA_VISIBLE_DEVICES`, or the guest CDI generator did not run — §4a, §7 |
 | `could not select device driver "" with capabilities: [[gpu]]` | `nvidia-container-toolkit` is not installed on the host. Docker needs it before `--gpus` works at all — §7 |
+| `nvidia-container-toolkit is required and was not found` | install it; preflight prints the command for your distribution — §7 |
+| `nvidia-container-toolkit X is too old (need >= 1.14.6)` | upgrade the toolkit — §7 |
+| `driver/library version mismatch: the loaded kernel module is X but the userspace on disk is Y` | a package upgrade replaced the driver without reloading the module. Reboot. `nvidia-smi` fails on such a host for every runtime, not just this one |
+| `N of the M driver files ... no longer exist` | the driver was upgraded after the manifest was built: `nvkvm-kata-gpu-cdi discover --force` |
+| `Input/output error (os error 5)` at container create | something in the mount list is not a regular file or directory. `discover` filters sockets/FIFOs/device nodes; if you hand-edited the manifest, that is the first place to look — [09](design/09-gpu-libraries-automatically.md) |
+| `ERROR: Program 'bzip2' not found` / `no usable tomli` / `missing build dependencies: xxd` | build dependencies; re-run with `--install-deps` — §0 |
+| `Unable to find a match: ninja-build meson libslirp-devel` (EL9) | the `CRB` repository is disabled: `dnf config-manager --set-enabled crb` — §0 |
 | `CDI device(s) ["nvidia.com/gpu=1"] do not exist` | you asked for more GPUs than the guest has — `--gpus 2` on a one-card host |
 | `failed to create TTRPC connection: dial unix  <text>` | something the shim wrapper runs printed to stdout or stderr; containerd parses that as the shim's address — §7 |
 | `nvidia-container-cli: mount error: … /proc/driver/nvidia: no such file` | Docker's prestart hook reached Kata. The injector should have removed it: check `/var/log/nvkvm-kata-gpu.log` and that `$PWD/config.json` was editable — §7 |

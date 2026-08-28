@@ -144,6 +144,139 @@ backup_once() {    # path -- copy to $BACKUP the first time we touch it
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════
+# DISTRO LAYER
+# Everything this installer needs is checked by COMMAND or by HEADER, never by
+# package name -- "is there a gcc" is the same question everywhere, and only the
+# answer to "what do I install to get one" is distro-specific.  So there is one
+# check list and one translation table, rather than three copies of the logic.
+#
+# Families, not distributions: Ubuntu and Debian differ in ways that do not
+# matter here, and so do Fedora, Rocky and RHEL.  ID_LIKE from os-release is the
+# standard way to ask, and derivatives (Mint, Manjaro, Alma) fall out for free.
+# ═════════════════════════════════════════════════════════════════════════════
+DISTRO_ID="" ; DISTRO_FAMILY="" ; DISTRO_PRETTY="" ; PKG_MGR=""
+
+detect_distro() {
+    local like=""
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        DISTRO_ID="${ID:-}" ; DISTRO_PRETTY="${PRETTY_NAME:-${ID:-unknown}}" ; like="${ID_LIKE:-}"
+    fi
+    case " $DISTRO_ID $like " in
+        *" debian "*|*" ubuntu "*)            DISTRO_FAMILY=debian ;;
+        *" arch "*)                           DISTRO_FAMILY=arch ;;
+        *" rhel "*|*" fedora "*|*" centos "*) DISTRO_FAMILY=rhel ;;
+        *) case "$DISTRO_ID" in
+               debian|ubuntu|linuxmint|pop|raspbian)      DISTRO_FAMILY=debian ;;
+               arch|archarm|manjaro|endeavouros|garuda)   DISTRO_FAMILY=arch ;;
+               fedora|rhel|centos|rocky|almalinux|ol)     DISTRO_FAMILY=rhel ;;
+               *)                                         DISTRO_FAMILY=unknown ;;
+           esac ;;
+    esac
+    case "$DISTRO_FAMILY" in
+        debian) PKG_MGR="apt-get" ;;
+        arch)   PKG_MGR="pacman" ;;
+        rhel)   PKG_MGR="$(command -v dnf >/dev/null 2>&1 && echo dnf || echo yum)" ;;
+    esac
+}
+
+# What provides <token>, per family.  Tokens are the things the checks below
+# actually look for, so this table is the ONLY place a package name appears.
+pkg_for() {   # token
+    case "$DISTRO_FAMILY:$1" in
+        debian:cc)        echo build-essential ;;
+        debian:cxx)       echo build-essential ;;
+        arch:cxx)         echo base-devel ;;
+        rhel:cxx)         echo gcc-c++ ;;
+        arch:cc)          echo base-devel ;;
+        rhel:cc)          echo "gcc make" ;;
+        debian:kvmhdr)    echo linux-libc-dev ;;
+        arch:kvmhdr)      echo linux-api-headers ;;
+        rhel:kvmhdr)      echo kernel-headers ;;
+        debian:sslhdr)    echo libssl-dev ;;
+        arch:sslhdr)      echo openssl ;;
+        rhel:sslhdr)      echo openssl-devel ;;
+        debian:elfhdr)    echo libelf-dev ;;
+        arch:elfhdr)      echo libelf ;;
+        rhel:elfhdr)      echo elfutils-libelf-devel ;;
+        debian:losetup)   echo mount ;;
+        *:losetup)        echo util-linux ;;
+        arch:python3)     echo python ;;
+        *:python3)        echo python3 ;;
+        debian:xxd)       echo xxd ;;
+        arch:xxd)         echo tinyxxd ;;
+        rhel:xxd)         echo vim-common ;;
+        debian:tomli)     echo python3-tomli ;;
+        arch:tomli)       echo python-tomli ;;
+        rhel:tomli)       echo python3-tomli ;;
+        debian:docker)    echo docker.io ;;
+        arch:docker)      echo docker ;;
+        rhel:docker)      echo docker-ce ;;
+        debian:objdump|arch:objdump|rhel:objdump) echo binutils ;;
+        debian:depmod|arch:depmod|rhel:depmod)    echo kmod ;;
+        # Everything else is named after itself in all three families:
+        # git gzip flex bison cpio curl zstd patch file bc rsync tar
+        *) echo "${1}" ;;
+    esac
+}
+
+# Never swallow the package manager's own error.  An unsubscribed RHEL says
+# "No match for argument: bc / Unable to find a match" -- which names the exact
+# problem -- and hiding it behind "dnf failed installing: bc patch zstd" turns a
+# 5-second diagnosis into a 20-minute one.  MEASURED on RHEL 9.5, 2026-08-28.
+PKG_LOG=""
+pkg_install() {   # packages...
+    PKG_LOG="$(mktemp)"
+    local rc=0
+    case "$DISTRO_FAMILY" in
+        debian) { DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+                    && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"; } \
+                  >"$PKG_LOG" 2>&1 || rc=$? ;;
+        arch)   pacman -Sy --noconfirm --needed "$@" >"$PKG_LOG" 2>&1 || rc=$? ;;
+        rhel)   "$PKG_MGR" install -y "$@" >"$PKG_LOG" 2>&1 || rc=$? ;;
+        *)      return 1 ;;
+    esac
+    if [ "$rc" != 0 ]; then
+        warn "$PKG_MGR said:"
+        sed 's/^/[nvkvm-kata]      | /' "$PKG_LOG" | tail -15 >&2
+    fi
+    return "$rc"
+}
+
+# EL9 hides a chunk of the build world in CRB (CodeReady Builder; "powertools"
+# on EL8), which is DISABLED by default.  ninja-build, meson and libslirp-devel
+# all live there, and without it nvkvm's own build_qemu.sh dies with
+# "Unable to find a match: ninja-build meson libslirp-devel" on a host that
+# looks perfectly well provisioned.  MEASURED on RHEL 9.5, 2026-08-28.
+# EPEL carries a few others.  Both are no-ops if already enabled.
+enable_extra_repos() {
+    [ "$DISTRO_FAMILY" = rhel ] || return 0
+    command -v dnf >/dev/null 2>&1 || return 0
+    dnf -y install dnf-plugins-core >/dev/null 2>&1 || true
+    local r
+    for r in crb powertools; do
+        if dnf config-manager --set-enabled "$r" >/dev/null 2>&1; then
+            change "enabled the '$r' repository (ninja-build, meson, libslirp-devel live there)"
+            return 0
+        fi
+    done
+    warn "could not enable CRB/powertools -- if the QEMU build cannot find ninja-build,"
+    warn "  meson or libslirp-devel, enable it by hand: dnf config-manager --set-enabled crb"
+}
+
+# The exact command a human should run, for the die() hint.  Generic advice
+# ("install the build dependencies") is useless at 2am on an unfamiliar box.
+pkg_install_cmd() {
+    case "$DISTRO_FAMILY" in
+        debian) echo "apt-get install $*" ;;
+        arch)   echo "pacman -S $*" ;;
+        rhel)   echo "$PKG_MGR install $*" ;;
+        *)      echo "install (unknown package manager): $*" ;;
+    esac
+}
+
 # STAGE 0 -- PREFLIGHT.  docs/install.md §0
 # Everything this build needs, checked before anything is built, so a missing
 # 200 KB package fails in one second instead of twenty minutes in.
@@ -155,6 +288,14 @@ preflight() {
     step "stage 0/8  preflight"
 
     [ "$(id -u)" -eq 0 ] || die "must run as root" "re-run under sudo"
+
+    detect_distro
+    if [ "$DISTRO_FAMILY" = unknown ]; then
+        warn "unrecognised distribution '${DISTRO_ID:-?}' -- treating dependencies as pre-installed"
+        warn "  tested families: debian/ubuntu, arch, rhel/fedora.  --install-deps cannot help here."
+    else
+        ok "$DISTRO_PRETTY (family: $DISTRO_FAMILY, packages: $PKG_MGR)"
+    fi
     [ "$(uname -m)" = "x86_64" ] || die "nvkvm is x86-64 only (this host is $(uname -m))" \
         "nothing fixes this; see nvkvm-pv/scripts/build_qemu.sh"
 
@@ -173,7 +314,14 @@ preflight() {
     [ -r /proc/driver/nvidia/version ] || die \
         "no NVIDIA driver loaded (/proc/driver/nvidia/version is absent)" \
         "install the NVIDIA driver on the HOST; nvkvm forwards to it and never unbinds it"
-    DRIVER_VERSION="$(sed -n 's/.*Kernel Module *\([0-9][0-9.]*\).*/\1/p' /proc/driver/nvidia/version | head -1)"
+    # Take the first dotted number on the line, NOT the token after "Kernel
+    # Module".  The open kernel module writes
+    #   NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  580.95.05 ...
+    # where the proprietary one writes
+    #   NVRM version: NVIDIA UNIX x86_64 Kernel Module  575.51.03 ...
+    # so anchoring on "Kernel Module" yields "for" on an open-module host and
+    # the installer dies on a perfectly good driver.  MEASURED 2026-08-28.
+    DRIVER_VERSION="$(grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)+' /proc/driver/nvidia/version | head -1)"
     [ -n "$DRIVER_VERSION" ] || die "could not parse the driver version out of /proc/driver/nvidia/version" \
         "cat it and report the format"
     ok "NVIDIA host driver $DRIVER_VERSION"
@@ -204,13 +352,43 @@ preflight() {
         ok "Kata $KATA_VER_FOUND at $KATA_ROOT"
     fi
 
-    # Container engine.
+    # Container engine.  A fresh RHEL box has docker and containerd INSTALLED
+    # and both units inactive, so "is the binary there" is not the question.
+    # Starting a service we are about to reconfigure is squarely in scope --
+    # stage 6 restarts both anyway.
+    local svc
+    for svc in containerd docker; do
+        if command -v "$svc" >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
+            if systemctl list-unit-files "$svc.service" >/dev/null 2>&1 \
+               && ! systemctl is-active --quiet "$svc" 2>/dev/null; then
+                change "$svc is installed but not running -- starting it"
+                systemctl enable --now "$svc" >/dev/null 2>&1 \
+                    || warn "could not start $svc -- 'systemctl status $svc' will say why"
+                sleep 2
+            fi
+        fi
+    done
+
     if command -v containerd >/dev/null 2>&1; then
         CTR_OK=1
         CONTAINERD_MAJOR="$(containerd --version 2>/dev/null | awk '{print $3}' | sed 's/^v//' | cut -d. -f1)"
         ok "containerd $(containerd --version 2>/dev/null | awk '{print $3}')"
     else
-        die "containerd is not installed" "apt-get install containerd.io (or docker-ce, which brings it)"
+        local hint
+        case "$DISTRO_FAMILY" in
+            debian) hint="apt-get install containerd.io  (or docker-ce, which brings it)" ;;
+            arch)   hint="pacman -S containerd  (or docker, which brings it)" ;;
+            rhel)   hint="$PKG_MGR install containerd.io  -- needs Docker's repo: $PKG_MGR config-manager --add-repo https://download.docker.com/linux/${DISTRO_ID}/docker-ce.repo" ;;
+            *)      hint="install containerd" ;;
+        esac
+        die "containerd is not installed" "$hint"
+    fi
+    # Docker is OPTIONAL from here down.  Its absence is a normal, supported
+    # configuration (k8s nodes, podman hosts) and must never fail a stage.
+    if [ "$NO_DOCKER" = 1 ]; then
+        log "docker: SKIPPED (--no-docker); containerd is the baseline and is enough"
+    elif ! command -v docker >/dev/null 2>&1; then
+        ok "no Docker on this host -- installing for containerd only (this is supported)"
     fi
     if [ "$NO_DOCKER" = 0 ] && command -v docker >/dev/null 2>&1; then
         local dv dmaj
@@ -229,37 +407,77 @@ preflight() {
         fi
     fi
 
-    # Build dependencies -- only the ones whose absence is not self-explanatory.
+    # Build dependencies.  Checked by command and by header -- never by package
+    # name -- so the same list serves every family; pkg_for() translates.
     if want qemu || want kernel || want rootfs || want libs; then
-        local missing=() need_pkg=()
-        _need() { command -v "$1" >/dev/null 2>&1 || { missing+=("$1"); need_pkg+=("$2"); }; }
-        _need gcc build-essential ; _need make build-essential ; _need git git
-        _need objdump binutils ; _need gzip gzip
-        _need flex flex ; _need bison bison ; _need cpio cpio
-        _need curl curl ; _need zstd zstd ; _need depmod kmod ; _need losetup mount
-        _need python3 python3 ; _need patch patch ; _need file file
-        [ -e /usr/include/linux/kvm.h ] || { missing+=(linux/kvm.h); need_pkg+=(linux-libc-dev); }
+        local missing=() tokens=()
+        _need() {   # command token
+            command -v "$1" >/dev/null 2>&1 || { missing+=("$1"); tokens+=("$2"); }
+        }
+        _need gcc cc      ; _need make cc      ; _need git git
+        # QEMU's meson probes for a C++ compiler.  Debian's build-essential and
+        # Arch's base-devel bring one; a minimal RHEL does not.
+        _need g++ cxx
+        _need objdump objdump ; _need gzip gzip ; _need tar tar
+        _need flex flex   ; _need bison bison  ; _need cpio cpio
+        _need curl curl   ; _need zstd zstd    ; _need depmod depmod
+        # bzip2 is a QEMU meson dependency ("ERROR: Program 'bzip2' not found").
+        # Debian/Ubuntu ship it in a base install; a minimal RHEL does not.
+        _need bzip2 bzip2
+        # xxd is a QEMU build dependency, and it is packaged under a DIFFERENT
+        # NAME in all three families: `xxd` on Debian/Ubuntu, `tinyxxd` on Arch
+        # (Arch has no package called xxd at all -- it is owned by tinyxxd, vim
+        # or gvim), `vim-common` on RHEL.  nvkvm-pv's build_qemu.sh asks pacman
+        # for "xxd" and gets nothing, then fails its own check with
+        # "ERROR: missing build dependencies: xxd".  MEASURED on Arch,
+        # 2026-08-28.  Satisfying it here means that never happens.
+        _need xxd xxd
+        _need losetup losetup ; _need python3 python3
+        _need patch patch ; _need file file
+        # bc and rsync are needed by the KERNEL build, not by us, and their
+        # absence surfaces two minutes in as an unattributable make error.
+        _need bc bc       ; _need rsync rsync
+        [ -e /usr/include/linux/kvm.h ] || { missing+=("linux/kvm.h"); tokens+=(kvmhdr); }
         # One header per operand: `ls a b` exits non-zero when EITHER is
         # absent, so a glob-plus-literal `ls` reported libssl-dev/libelf-dev
-        # missing on every run, installed or not, and re-ran apt-get each time.
-        _need_hdr() {   # header package
+        # missing on every run, installed or not, and re-ran the package
+        # manager each time.
+        _need_hdr() {   # header token
             local h
             for h in "/usr/include/$1" /usr/include/*/"$1"; do [ -e "$h" ] && return 0; done
-            missing+=("$1"); need_pkg+=("$2")
+            missing+=("$1"); tokens+=("$2")
         }
-        _need_hdr openssl/ssl.h libssl-dev
-        _need_hdr libelf.h      libelf-dev
-        command -v docker >/dev/null 2>&1 || { missing+=(docker); need_pkg+=(docker.io); }
+        _need_hdr openssl/ssl.h sslhdr
+        _need_hdr libelf.h      elfhdr
+        # QEMU 11's configure parses pyproject.toml, so it needs tomllib --
+        # stdlib from Python 3.11, a separate `tomli` package before that.
+        # RHEL 9 ships Python 3.9, so a perfectly provisioned EL9 host fails
+        # deep inside the QEMU build with
+        #     *** Ouch! *** found no usable tomli, please install it
+        # MEASURED on RHEL 9.5, 2026-08-28.  Debian 12 and Ubuntu 22.04+ are
+        # already on 3.11+; Arch is current.  Only check when it is needed.
+        if ! python3 -c 'import tomllib' >/dev/null 2>&1 \
+           && ! python3 -c 'import tomli'   >/dev/null 2>&1; then
+            missing+=("python tomllib/tomli"); tokens+=(tomli)
+        fi
+        # NOTE: no container engine in this list.  Docker is NOT required to
+        # install nvkvm-kata -- a Kubernetes node or a podman host has
+        # containerd and no Docker at all, and those are exactly the hosts this
+        # project is for.  The rootfs stage used to need `docker` to harvest
+        # kmod; it now fetches the .deb directly, so nothing here does.
         if [ ${#missing[@]} -gt 0 ]; then
-            local pkgs; pkgs="$(printf '%s\n' "${need_pkg[@]}" | sort -u | tr '\n' ' ')"
-            if [ "$DO_INSTALL_DEPS" = 1 ]; then
-                change "installing build deps: $pkgs"
-                DEBIAN_FRONTEND=noninteractive apt-get update -qq \
-                  && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $pkgs \
-                  || die "apt-get failed installing: $pkgs" "install them by hand and re-run"
+            local pkgs t
+            pkgs="$(for t in "${tokens[@]}"; do pkg_for "$t"; done | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+            if [ "$DO_INSTALL_DEPS" = 1 ] && [ "$DISTRO_FAMILY" != unknown ]; then
+                enable_extra_repos
+                change "installing build deps ($DISTRO_FAMILY): $pkgs"
+                # shellcheck disable=SC2086
+                pkg_install $pkgs \
+                  || die "$PKG_MGR failed installing: $pkgs" \
+                         "run it by hand and re-run: $(pkg_install_cmd "$pkgs")"
             else
                 die "missing build dependencies: ${missing[*]}" \
-                    "re-run with --install-deps, or: apt-get install $pkgs"
+                    "re-run with --install-deps, or: $(pkg_install_cmd "$pkgs")"
             fi
         fi
         ok "build dependencies present"
@@ -412,6 +630,9 @@ stock_kata_config() {
 # ═════════════════════════════════════════════════════════════════════════════
 NVKVM_QEMU_PATH=/opt/qemu-nvkvm/bin/qemu-system-x86_64
 stage_qemu() {
+    # build_qemu.sh installs its own dependencies, and on EL9 half of them are
+    # in CRB.  Enable it here too: --only qemu skips preflight's dep block.
+    [ "$DO_INSTALL_DEPS" = 1 ] && enable_extra_repos
     step "stage 2/8  nvkvm's QEMU"
     if [ -n "$QEMU_BIN" ]; then
         [ -x "$QEMU_BIN" ] || die "--qemu $QEMU_BIN is not executable" "point it at a built qemu-system-x86_64"
@@ -815,15 +1036,22 @@ stage_libs() {
     # fails with "could not select device driver".  So requiring the toolkit
     # costs nothing that was not already required, and it is also where the
     # discovery comes from.
+    # nvidia-container-toolkit is REQUIRED, and deliberately not installed by
+    # this script.  Setting up NVIDIA's package repository on someone else's
+    # host is invasive, it is the most distro-divergent work in the whole
+    # install, and a GPU host that runs containers already has the toolkit --
+    # it is how anyone runs a GPU container at all.  So: detect, and fail
+    # loudly naming the exact command for THIS distribution.
     if ! command -v nvidia-ctk >/dev/null 2>&1; then
-        if [ "$DO_INSTALL_DEPS" = 1 ]; then
-            change "installing nvidia-container-toolkit (nvidia-ctk is the library discoverer)"
-            apt_install_toolkit || die "could not install nvidia-container-toolkit" \
-                "install it by hand -- https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html"
-        else
-            die "nvidia-ctk not found" \
-                "install nvidia-container-toolkit (or re-run with --install-deps).  Docker needs it too: without it, docker run --gpus all fails outright"
-        fi
+        local tkhint
+        case "$DISTRO_FAMILY" in
+            debian) tkhint="curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg && curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' > /etc/apt/sources.list.d/nvidia-container-toolkit.list && apt-get update && apt-get install -y nvidia-container-toolkit" ;;
+            arch)   tkhint="pacman -S nvidia-container-toolkit    (it is in [extra])" ;;
+            rhel)   tkhint="$PKG_MGR config-manager --add-repo https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo && $PKG_MGR install -y nvidia-container-toolkit" ;;
+            *)      tkhint="install nvidia-container-toolkit -- https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html" ;;
+        esac
+        die "nvidia-container-toolkit is required and was not found (no nvidia-ctk on PATH)" \
+            "$tkhint"
     fi
 
     local manifest="$STATE/gpu-mounts.json"
@@ -863,19 +1091,6 @@ sys.exit(0 if (not missing and soname) else 1)' "$manifest" \
     fi
 }
 
-# Install nvidia-container-toolkit from NVIDIA's own apt repository.  Only ever
-# called with --install-deps.
-apt_install_toolkit() {
-    apt-get install -y -qq nvidia-container-toolkit >/dev/null 2>&1 && return 0
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
-        | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null || return 1
-    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
-        | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
-        > /etc/apt/sources.list.d/nvidia-container-toolkit.list || return 1
-    apt-get update -qq >/dev/null 2>&1
-    apt-get install -y -qq nvidia-container-toolkit >/dev/null 2>&1
-}
-
 # ═════════════════════════════════════════════════════════════════════════════
 # STAGE 8 -- VERIFY.  docs/install.md §8
 # "Installed" and "working" are different claims.  This stage RUNS THE PROOF.
@@ -890,76 +1105,83 @@ stage_verify() {
     step "stage 8/8  verify -- running the real proof, not a file listing"
     local rel; rel="$(cat "$ARTIFACTS/release" 2>/dev/null || echo '')"
     local img=docker.io/library/ubuntu:24.04
-    local out
+    local out eng
 
-    if [ "$DOCKER_OK" = 1 ]; then
+    # WHICH ENGINE PROVES THE INSTALL.
+    # Docker if it is here, `ctr` if it is not -- and `ctr` is not a lesser
+    # path, it is the baseline: a Kubernetes node or a podman host has
+    # containerd and no Docker, and skipping the proof there would mean
+    # reporting success on the one configuration we never checked.  Both arms
+    # run the SAME checks, including a real CUDA workload.
+    if [ "$DOCKER_OK" = 1 ]; then eng=docker; else eng=ctr; fi
+    ok "proving the install with: $eng"
+
+    if [ "$eng" = docker ]; then
         docker pull -q "$img" >/dev/null 2>&1 || warn "could not pull $img"
-
-        # control 1: runc still works.  If we broke daemon.json this fails.
-        if out="$(docker run --rm "$img" /bin/true 2>&1)"; then verify_pass "control: runc still runs containers"
-        else verify_fail "control: runc is BROKEN after install -- $out"; fi
-
-        # the guest is ours: uname must be the kernel we built.
-        if out="$(run_nvkvm docker "$img" /bin/sh -c 'uname -r' 2>&1)"; then
-            if [ -n "$rel" ] && printf '%s' "$out" | grep -q "$rel"; then
-                verify_pass "guest kernel is $rel (the nvkvm-kata configuration was selected, not the stock one)"
-            else
-                verify_fail "guest kernel is '$out', expected $rel -- KATA_CONF_FILE did not reach the shim"
-            fi
+        if out="$(docker run --rm "$img" /bin/true 2>&1)"; then
+            verify_pass "control: runc still runs containers"
         else
-            verify_fail "could not start a container on runtime $RUNTIME_NAME: $out"
-        fi
-
-        # the module loaded and registered its char devices.
-        if out="$(run_nvkvm docker "$img" /bin/sh -c 'grep -E "nvidia|nvidia-uvm" /proc/devices' 2>&1)"; then
-            printf '%s' "$out" | grep -q nvidiactl \
-                && verify_pass "nvkvm-guest.ko loaded: $(printf '%s' "$out" | tr '\n' ' ')" \
-                || verify_fail "no nvidia char devices in the guest -- module did not load: $out"
-        else
-            verify_fail "device probe failed: $out"
-        fi
-
-        # The libraries arrived on their own, and resolve on their own.  This
-        # is the check that stage 7 actually replaced the manual volume: no
-        # -v, no LD_LIBRARY_PATH, and libcuda.so.1 still resolves.
-        # `ldd | grep "not found"` proves the mounts are complete, not just
-        # present; `|| true` because grep exits 1 on the GOOD outcome (no
-        # unresolved libraries) and that would fail the check backwards.
-        if out="$(run_nvkvm docker "$img" /bin/sh -c 'nvidia-smi -L; echo "unresolved:$(ldd /usr/bin/nvidia-smi | grep -c "not found" || true)"' 2>&1)"; then
-            if printf '%s' "$out" | grep -q 'GPU 0' && printf '%s' "$out" | grep -q 'unresolved:0'; then
-                verify_pass "nvidia-smi works with no volume and no LD_LIBRARY_PATH, 0 unresolved libraries: $(printf '%s' "$out" | grep 'GPU 0')"
-            else
-                verify_fail "nvidia-smi did not enumerate a GPU, or libraries are unresolved: $out"
-            fi
-        else
-            verify_fail "nvidia-smi could not run in the container: $out"
-        fi
-
-        # THE PROOF.
-        log "running the CUDA vector-add in a container on runtime '$RUNTIME_NAME'..."
-        if out="$(run_nvkvm docker "$img" /usr/local/nvidia/bin/vecadd 2>&1)"; then
-            printf '%s\n' "$out" | sed 's/^/[nvkvm-kata]      | /' >&2
-            printf '%s' "$out" | grep -q 'VECADD OK' \
-                && verify_pass "CUDA vector-add ran on the GPU, in a container, in a Kata VM, through nvkvm" \
-                || verify_fail "vecadd ran but did not print VECADD OK"
-        else
-            printf '%s\n' "$out" | sed 's/^/[nvkvm-kata]      | /' >&2
-            verify_fail "vecadd did not run"
+            verify_fail "control: runc is BROKEN after install -- $out"
         fi
     else
-        # ctr fallback -- same three checks, one tool down.
         ctr images pull "$img" >/dev/null 2>&1 || warn "could not pull $img with ctr"
-        if out="$(run_nvkvm ctr "$img" /bin/sh -c 'uname -r' 2>&1)"; then
-            [ -n "$rel" ] && printf '%s' "$out" | grep -q "$rel" \
-                && verify_pass "guest kernel is $rel" || verify_fail "guest kernel '$out' != $rel"
-        else verify_fail "could not start a container: $out"; fi
-        if out="$(run_nvkvm ctr "$img" /usr/local/nvidia/bin/vecadd 2>&1)"; then
-            printf '%s\n' "$out" | sed 's/^/[nvkvm-kata]      | /' >&2
-            printf '%s' "$out" | grep -q 'VECADD OK' && verify_pass "CUDA vector-add ran" || verify_fail "no VECADD OK"
-        else printf '%s\n' "$out" | sed 's/^/[nvkvm-kata]      | /' >&2; verify_fail "vecadd did not run"; fi
+        ok "control: no Docker on this host -- verifying through containerd only"
     fi
 
-    # the host never lost the card -- the entire point of nvkvm.
+    # 1. the nvkvm configuration was selected, not the stock one.
+    if out="$(run_nvkvm "$eng" "$img" /bin/sh -c 'uname -r' 2>&1)"; then
+        if [ -n "$rel" ] && printf '%s' "$out" | grep -q "$rel"; then
+            verify_pass "guest kernel is $rel (the nvkvm-kata configuration was selected, not the stock one)"
+        else
+            verify_fail "guest kernel is '$out', expected $rel -- the configuration did not reach the shim"
+        fi
+    else
+        verify_fail "could not start a container on runtime $RUNTIME_NAME: $out"
+    fi
+
+    # 2. the module loaded and registered its char devices.
+    if out="$(run_nvkvm "$eng" "$img" /bin/sh -c 'grep -E "nvidia|nvidia-uvm" /proc/devices' 2>&1)"; then
+        printf '%s' "$out" | grep -q nvidiactl \
+            && verify_pass "nvkvm-guest.ko loaded: $(printf '%s' "$out" | tr '\n' ' ')" \
+            || verify_fail "no nvidia char devices in the guest -- module did not load: $out"
+    else
+        verify_fail "device probe failed: $out"
+    fi
+
+    # 3. the libraries arrived on their own, and resolve on their own.  This is
+    #    the check that stage 7 actually replaced the manual volume: no -v, no
+    #    LD_LIBRARY_PATH, and libcuda.so.1 still resolves.
+    #    `|| true` because grep exits 1 on the GOOD outcome (no unresolved
+    #    libraries) and that would fail the check backwards.
+    # `ldd /usr/bin/nvidia-smi` is NOT a good check and was one here briefly:
+    # nvidia-smi dlopen()s libnvidia-ml at run time rather than linking it, so
+    # ldd reports nothing missing even when the loader cannot find a single
+    # NVIDIA library.  It passed green on a RHEL host where libcuda.so.1 was
+    # unreachable.  Ask the loader the question the workload will ask instead:
+    # is libcuda.so.1 in the cache, and does it dlopen.
+    if out="$(run_nvkvm "$eng" "$img" /bin/sh -c 'nvidia-smi -L; ldconfig -p | grep -c "libcuda.so.1" || true' 2>&1)"; then
+        if printf '%s' "$out" | grep -q 'GPU 0' && ! printf '%s' "$out" | grep -qx '0'; then
+            verify_pass "nvidia-smi works and libcuda.so.1 is in the container's ldcache, with no volume and no LD_LIBRARY_PATH: $(printf '%s' "$out" | grep 'GPU 0')"
+        else
+            verify_fail "nvidia-smi did not enumerate a GPU, or libcuda.so.1 is not resolvable: $out"
+        fi
+    else
+        verify_fail "nvidia-smi could not run in the container: $out"
+    fi
+
+    # 4. THE PROOF -- a real CUDA workload that checks its own arithmetic.
+    log "running the CUDA vector-add in a container on runtime '$RUNTIME_NAME' (via $eng)..."
+    if out="$(run_nvkvm "$eng" "$img" /usr/local/nvidia/bin/vecadd 2>&1)"; then
+        printf '%s\n' "$out" | sed 's/^/[nvkvm-kata]      | /' >&2
+        printf '%s' "$out" | grep -q 'VECADD OK' \
+            && verify_pass "CUDA vector-add ran on the GPU, in a container, in a Kata VM, through nvkvm" \
+            || verify_fail "vecadd ran but did not print VECADD OK"
+    else
+        printf '%s\n' "$out" | sed 's/^/[nvkvm-kata]      | /' >&2
+        verify_fail "vecadd did not run"
+    fi
+
+    # 5. the host never lost the card -- the entire point of nvkvm.
     if [ -r /proc/driver/nvidia/gpus ] || ls /sys/bus/pci/drivers/nvidia/0000:* >/dev/null 2>&1; then
         verify_pass "host driver still bound to the GPU (no VFIO, no unbind)"
     else
@@ -968,7 +1190,7 @@ stage_verify() {
 
     if [ "$VERIFY_FAILED" != 0 ]; then
         die "VERIFICATION FAILED -- nvkvm-kata is installed but NOT working" \
-            "read the failures above; 'journalctl -t kata -n200' and NVKVM_SHIM_LOG in $SHIM_ENV are the next places to look. Revert with scripts/nvkvm-kata-uninstall.sh"
+            "read the failures above; 'journalctl -t kata -n200', /var/log/nvkvm-kata-gpu.log and NVKVM_SHIM_LOG in $SHIM_ENV are the next places to look. Revert with scripts/nvkvm-kata-uninstall.sh"
     fi
 }
 

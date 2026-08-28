@@ -20,7 +20,7 @@
 #     modprobes the module -- i.e. at create_sandbox, before the first
 #     create_container, which is the ordering doc 03/04 need.
 #
-# Usage (as root, on a host with docker):
+# Usage (as root; needs curl + ar/tar, no container engine):
 #   scripts/prepare-guest-rootfs.sh --image /opt/kata/share/kata-containers/kata-containers.img
 #   scripts/prepare-guest-rootfs.sh --rootfs /mnt/somewhere   # already-mounted
 set -euo pipefail
@@ -57,16 +57,66 @@ done
 [ -n "$IMAGE$ROOTFS" ] || die "one of --image / --rootfs is required"
 [ "$(id -u)" -eq 0 ] || die "must run as root"
 
-# --- 1. harvest kmod + its libraries from the guest's own distro release -----
-# Built against the SAME release the rootfs is, so glibc and libcrypto symbol
-# versions match by construction.  (A host-built kmod would work forward but not
-# backward; this removes the question.)
+# --- 1. get kmod, built for the guest's own distro release -------------------
+# It must match the ROOTFS's release, not this host's: the rootfs is Ubuntu
+# noble, and a kmod linked against a newer glibc simply will not run in there.
+#
+# The way to guarantee that is to take Ubuntu's own noble binary, and the most
+# direct way to get it is to fetch the .deb from the archive and unpack it.
+# That is deliberate and not merely convenient: THIS INSTALLER MUST NOT REQUIRE
+# DOCKER.  A Kubernetes node or a podman host runs containerd and no Docker,
+# and those are exactly the hosts this project targets.  The previous version
+# of this script ran `docker run ubuntu:24.04 apt-get install kmod`, which made
+# Docker a hard dependency of the whole install for the sake of one 174 KB
+# binary.
+#
+# A container engine is still used if one happens to be present and the
+# download fails, and --kmod-from short-circuits both for an offline build.
 STAGE="$(mktemp -d)" ; trap 'rm -rf "$STAGE"' EXIT
-if [ -n "$KMOD_SRC" ]; then
-    cp -a "$KMOD_SRC/." "$STAGE/"
-else
-    command -v docker >/dev/null || die "need docker to harvest kmod, or pass --kmod-from"
-    docker run --rm -v "$STAGE:/out" "ubuntu:$UBUNTU" sh -c '
+UBUNTU_SUITE="noble"
+case "$UBUNTU" in 24.04) UBUNTU_SUITE=noble ;; 22.04) UBUNTU_SUITE=jammy ;; 26.04) UBUNTU_SUITE=resolute ;; esac
+
+fetch_deb_kmod() {
+    local mirror pkgs url ver
+    for mirror in http://archive.ubuntu.com/ubuntu http://us.archive.ubuntu.com/ubuntu; do
+        pkgs="$(curl -fsSL --max-time 60 "$mirror/dists/$UBUNTU_SUITE/main/binary-amd64/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null)" || continue
+        [ -n "$pkgs" ] || continue
+        # The stanza for the binary package named exactly "kmod".
+        # Paragraph mode with FS="\n" so each field is a whole line -- a plain
+        # `awk -v RS=''` splits on whitespace and the ^Package: kmod$ anchor
+        # then never matches, silently yielding an empty URL.
+        url="$(printf '%s' "$pkgs" | awk 'BEGIN{RS="";FS="\n"}
+              { pkg=""; fn="";
+                for(i=1;i<=NF;i++){ if($i ~ /^Package: /) pkg=substr($i,10);
+                                    else if($i ~ /^Filename: /) fn=substr($i,11) }
+                if(pkg=="kmod" && fn!=""){ print fn; exit } }')"
+        [ -n "$url" ] || continue
+        echo "  fetching $mirror/$url"
+        curl -fsSL --max-time 300 -o "$STAGE/kmod.deb" "$mirror/$url" || continue
+        ( cd "$STAGE" && ar x kmod.deb && mkdir -p x \
+          && tar -xf data.tar.* -C x ) || continue
+        # Ubuntu ships /usr/bin/kmod plus applet symlinks; we only need the binary.
+        if [ -x "$STAGE/x/usr/bin/kmod" ]; then
+            mkdir -p "$STAGE/usr/bin" "$STAGE/lib/x86_64-linux-gnu"
+            cp -a "$STAGE/x/usr/bin/kmod" "$STAGE/usr/bin/kmod"
+            # Its shared libraries come from the rootfs itself (same release),
+            # except the compression libs, which noble's kmod links against and
+            # which the Kata image may not carry.  Copy any that ship in the deb.
+            for l in "$STAGE"/x/usr/lib/x86_64-linux-gnu/*.so.*; do
+                [ -e "$l" ] && cp -a "$l" "$STAGE/lib/x86_64-linux-gnu/" 2>/dev/null || true
+            done
+            return 0
+        fi
+    done
+    return 1
+}
+
+fetch_container_kmod() {
+    local cli=""
+    for c in docker podman; do command -v "$c" >/dev/null 2>&1 && { cli="$c"; break; }; done
+    [ -n "$cli" ] || return 1
+    echo "  falling back to $cli to harvest kmod"
+    "$cli" run --rm -v "$STAGE:/out" "ubuntu:$UBUNTU" sh -c '
         set -e
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq >/dev/null && apt-get install -y -qq kmod >/dev/null
@@ -75,9 +125,20 @@ else
         for l in $(ldd /usr/bin/kmod | awk "/=>/ {print \$3}"); do cp -aL "$l" /out/lib/x86_64-linux-gnu/; done
         chmod -R a+rX /out
     '
+}
+
+if [ -n "$KMOD_SRC" ]; then
+    cp -a "$KMOD_SRC/." "$STAGE/"
+elif fetch_deb_kmod; then
+    :
+elif fetch_container_kmod; then
+    :
+else
+    die "could not obtain kmod for Ubuntu $UBUNTU ($UBUNTU_SUITE)" \
+        "check outbound access to archive.ubuntu.com, or pass --kmod-from DIR with usr/bin/kmod in it"
 fi
 [ -x "$STAGE/usr/bin/kmod" ] || die "no kmod harvested"
-echo "harvested kmod: $(ls -l "$STAGE/usr/bin/kmod" | awk '{print $5}') bytes, libs: $(ls "$STAGE/lib/x86_64-linux-gnu" | tr '\n' ' ')"
+echo "harvested kmod: $(stat -c %s "$STAGE/usr/bin/kmod") bytes, libs: $(ls "$STAGE/lib/x86_64-linux-gnu" 2>/dev/null | tr '\n' ' ')"
 
 install_into() {
     local root="$1"
@@ -86,6 +147,7 @@ install_into() {
     mkdir -p "$root/usr/bin" "$root/usr/lib/x86_64-linux-gnu" "$root/sbin"
     cp -a "$STAGE/usr/bin/kmod" "$root/usr/bin/kmod"
     for l in "$STAGE"/lib/x86_64-linux-gnu/*; do
+        [ -e "$l" ] || continue          # the .deb path bundles no libraries
         b="$(basename "$l")"
         # Only fill gaps: never shadow a library the rootfs already has.
         if [ ! -e "$root/usr/lib/x86_64-linux-gnu/$b" ] && [ ! -e "$root/lib/x86_64-linux-gnu/$b" ]; then
@@ -113,6 +175,27 @@ install_into() {
         ln -sf /usr/bin/kmod "$sbin_real/$applet"
     done
     [ -x "$root/usr/bin/kmod" ] || die "kmod missing at $root/usr/bin/kmod"
+
+    # Assert kmod's shared libraries actually resolve INSIDE the image.
+    #
+    # The .deb carries only the binary; its libraries are expected to come from
+    # the rootfs, which is the same Ubuntu release, so they normally do.  But
+    # "normally" is exactly the assumption that produced this project's worst
+    # failure mode already: a dangling /sbin/modprobe fails the sandbox with
+    # "No such file or directory (os error 2)" and names nothing
+    # (docs/design/07-end-to-end.md 8.2).  A missing libzstd would fail the
+    # same unhelpful way, at run time, on someone else's host.  Check now.
+    local need missing_libs=""
+    need="$(objdump -p "$root/usr/bin/kmod" 2>/dev/null | awk '/NEEDED/{print $2}')"
+    for b in $need; do
+        [ -e "$root/usr/lib/x86_64-linux-gnu/$b" ] || [ -e "$root/lib/x86_64-linux-gnu/$b" ] \
+            || [ -e "$root/usr/lib64/$b" ] || missing_libs="$missing_libs $b"
+    done
+    if [ -n "$missing_libs" ]; then
+        die "kmod needs these libraries and the guest rootfs has none of them:$missing_libs" \
+            "the rootfs release and the kmod package disagree; pass --kmod-from DIR with usr/bin/kmod and its libs, or use --ubuntu <release> matching the image"
+    fi
+    echo "  kmod dependencies resolve in the image:$(printf ' %s' $need)"
     echo "  $sbin_real/modprobe -> /usr/bin/kmod"
 
     # --- the guest-side CDI generator ---------------------------------------
