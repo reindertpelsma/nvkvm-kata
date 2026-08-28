@@ -1,0 +1,11 @@
+=== OLD-main ===
+installer rc=0
+shim.env now says: NVKVM_QEMU=/opt/qemu-nvkvm/bin/qemu-system-x86_64
+RESULT[OLD-main]: --qemu was IGNORED   (the defect)
+
+=== NEW-fixed ===
+installer rc=0
+shim.env now says: NVKVM_QEMU=/opt/qemu-right/bin/qemu-system-x86_64
+RESULT[NEW-fixed]: --qemu WAS honoured  (correct)
+
+restored: NVKVM_QEMU=/opt/qemu-nvkvm/bin/qemu-system-x86_64

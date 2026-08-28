@@ -1,0 +1,24 @@
+### host ###
+Ubuntu 22.04.5 LTS
+6.8.0-59-generic
+NVRM version: NVIDIA UNIX x86_64 Kernel Module  575.51.03  Wed Apr 16 14:22:51 UTC 2025
+GPU 0: NVIDIA GeForce RTX 4070 Ti (UUID: GPU-60ae2a11-c8d7-7102-1c12-0d0bc8e5ec29)
+Docker version 29.7.2, build a7dcaa6
+containerd containerd v2.3.3 aad11006b869517fcd3009450b6f82da282e1a9b
+NVIDIA Container Toolkit CLI version 1.20.0
+
+### these were enabled by apt-get install nvidia-container-toolkit, not by us ###
+enabled
+enabled
+
+### docker pre-resolves --gpus through CDI ###
+ CDI spec directories:
+  /etc/cdi
+  /run/cdi
+ Discovered Devices:
+  cdi: nvidia.com/gpu=0
+
+### the injector under test ###
+523b7e295399f4d72118d9533cc6162c  /opt/nvkvm-kata/bin/nvkvm-kata-gpu-cdi
+523b7e295399f4d72118d9533cc6162c  /root/nvkvm-kata/scripts/lib/gpu-cdi.py
+gpu-cdi self-test: 33 checks, 0 failed

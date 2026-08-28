@@ -1,0 +1,16 @@
+# Defect 1 -- the driver-version rule, old vs new, on all three real formats
+# Run locally; no GPU needed.  The same three fixtures are pinned in
+# scripts/lib/gpu-cdi.py self-test so this cannot regress unnoticed.
+# OLD(main) is main's rule verbatim: grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)+' over the WHOLE file.
+
+FORMAT         EXPECTED     OLD(main)    NEW(bash)    NEW(python)
+proprietary    575.51.03    575.51.03    575.51.03    575.51.03
+open-3comp     580.95.05    580.95.05    580.95.05    580.95.05
+open-2comp     595.84       15.2.0       595.84       595.84   <-- OLD RULE WRONG
+
+# The two-component row is the defect: 15.2.0 is the GCC version from the
+# file's SECOND line, which a whole-file search for a three-component
+# number finds when the driver has only two.
+
+# --- the self-test that pins it, in the repo ---
+gpu-cdi self-test: 33 checks, 0 failed

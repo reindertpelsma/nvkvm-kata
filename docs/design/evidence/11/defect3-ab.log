@@ -1,0 +1,22 @@
+=== host state ===
+srwxrwxrwx 1 root root 0 Aug 28 15:00 /run/nvidia-persistenced/socket
+2
+
+######## OLD injector (main) ########
+  21: <unknown>
+  22: <unknown>
+  23: <unknown>
+  24: <unknown>
+
+Run 'docker run --help' for more information
+rc=0
+--- injector log ---
+
+######## NEW injector (fixed) ########
+GPU 0: NVIDIA GeForce RTX 4070 Ti (UUID: GPU-60ae2a11-c8d7-7102-1c12-0d0bc8e5ec29)
+rc=0
+--- injector log ---
+2026-08-28T15:30:40Z a3922582f7308c1b8bbf4fad45b2d48e5ebd9bbc3686d73ae3fd3ac292586353 daemon-CDI: dropped host device node /dev/dri/card0 -- host major/minor does not address anything in the guest; the guest CDI spec creates its own (doc 07 sec 5)
+2026-08-28T15:30:40Z a3922582f7308c1b8bbf4fad45b2d48e5ebd9bbc3686d73ae3fd3ac292586353 daemon-CDI: dropped host device node /dev/dri/renderD128 -- host major/minor does not address anything in the guest; the guest CDI spec creates its own (doc 07 sec 5)
+2026-08-28T15:30:40Z a3922582f7308c1b8bbf4fad45b2d48e5ebd9bbc3686d73ae3fd3ac292586353 dropped mount /run/nvidia-persistenced/socket -> /run/nvidia-persistenced/socket: source is a socket, and only regular files and directories cross virtio-fs into the guest; leaving it would fail createContainer with "Input/output error (os error 5)"
+2026-08-28T15:30:40Z a3922582f7308c1b8bbf4fad45b2d48e5ebd9bbc3686d73ae3fd3ac292586353 NVIDIA_VISIBLE_DEVICES=all -> VISIBLE_CDI_DEVICES=nvidia.com/gpu=all, +32 mounts, -7 host hooks, daemon-CDI resolved upstream (devices re-derived in-guest), -1 untraversable mounts (socket)
