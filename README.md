@@ -1,16 +1,46 @@
 # nvkvm-kata
 
-**Status: IT RUNS.** On 2026-08-27 a CUDA vector-add executed inside an OCI
-container, inside a Kata Containers VM, on an NVIDIA RTX 4070 Ti SUPER, with
-every ioctl forwarded by nvkvm to the host driver — and the host keeping the
-card the whole time. Two Kata sandboxes then shared that one GPU concurrently,
-which is the thing Kata's existing VFIO passthrough path cannot do at all.
-**Read [07 — End to end](docs/design/07-end-to-end.md)**: it has the commands
-that reproduce it, and two measured findings that change what the earlier
-design docs claim.
+**Give a container a real NVIDIA GPU, behind a real VM boundary, without taking
+the GPU away from the host.**
 
-Upstream changes required for any of it: **one line** — widening
-`build-kernel.sh`'s `-g` vendor validation to accept a third value.
+Today you get to pick two of three. Plain containers share the GPU but put your
+workload one kernel bug away from the host. [Kata
+Containers](https://katacontainers.io) puts each container in its own VM, but its
+GPU story is PCIe passthrough — the card is bound to `vfio-pci`, handed to one
+sandbox, and gone from the host and from every other sandbox. vGPU gets you
+sharing and isolation, and a licence bill.
+
+`nvkvm-kata` is the third option.
+[nvkvm](https://github.com/reindertpelsma/nvkvm-pv) gives a KVM guest
+driver-level NVIDIA access with no passthrough: a guest kernel module forwards
+the NVIDIA driver's own ioctl interface over virtio to unprivileged
+per-guest-process helper processes on the host, which run the real ioctls against
+the real driver — while the host keeps using the card. Guest userspace is stock
+NVIDIA, and it measures at roughly host parity for CUDA, PyTorch, LLM inference
+and Vulkan compute. This repository runs that stack **inside Kata**, so an
+OCI or Kubernetes workload gets a GPU behind a VM boundary, with no passthrough,
+no vGPU licence, and no loss of the card to the host.
+
+**Scope is deliberately narrow: compute and headless graphics only.** No display
+path, no display broker, no audio, no clipboard, no input. If you want a desktop,
+that is [nvkvm-steamos](https://github.com/reindertpelsma/nvkvm-steamos).
+
+## Status: it runs
+
+On 2026-08-27 a CUDA vector-add executed inside an OCI container, inside a Kata
+Containers VM, on an NVIDIA RTX 4070 Ti SUPER, with every ioctl forwarded by
+nvkvm to the host driver — and the host keeping the card the whole time. Two Kata
+sandboxes then shared that one GPU concurrently, which is the thing Kata's
+existing VFIO path cannot do at all. It has since been reproduced on a second
+architecture (Ampere) and on a third machine from a cold host.
+
+**Upstream changes required for any of it: one line** — widening
+`build-kernel.sh`'s `-g` vendor validation to accept a third value. No patch to
+the Kata runtime, shim, agent or rustjail.
+
+**Read [07 — End to end](docs/design/07-end-to-end.md)**: it has the commands
+that reproduce it, and two measured findings that change what the earlier design
+docs claim.
 
 ## Install it
 
@@ -78,25 +108,22 @@ can open `/dev/nvidiactl` and every other NVIDIA node, unconfigured, for both
 and driver. Not because Kata permits it, but because Kata's device policy is
 silently discarded on cgroup v2 before it is ever attached.
 
-## The pitch, in one paragraph
+## A claim this project had to withdraw
 
-[`nvkvm`](../nvkvm-pv) gives a KVM guest driver-level NVIDIA GPU access without
-PCIe passthrough: a guest kernel module forwards the NVIDIA driver's own ioctl
-interface over virtio to unprivileged per-guest-process isolate processes on the
-host, which run the real ioctls against the real driver, while the host keeps
-using the card. Guest userspace is stock NVIDIA. Measured at roughly host parity
-for CUDA, PyTorch, LLM inference and Vulkan compute. **`nvkvm-kata` is the
-proposal to run that stack inside [Kata Containers](https://katacontainers.io),
-so that an OCI/Kubernetes workload gets a GPU behind a real VM boundary with no
-passthrough, no vGPU licence, and no loss of the GPU to the host.**
+It was pitched partly on "…and the VMM gets confined by the container platform's
+own machinery rather than by nvkvm's own tooling". **Measurement removed most of
+that clause.** Kata jails Firecracker and enables Cloud Hypervisor's seccomp by
+default; its QEMU driver gets neither and ships with `seccompsandbox = ""`. nvkvm
+is QEMU-only, so this project is pinned to Kata's least-confined VMM.
 
-The original pitch added "…and so that the VMM is confined by the container
-platform's own machinery rather than by nvkvm's own tooling". **Measurement
-removed most of that clause** — Kata jails Firecracker but not QEMU, and nvkvm
-is QEMU-only. What survives, and is a better reason, is below.
-
-Scope is deliberately narrow: **compute and headless graphics only.** No display
-path, no display broker, no audio, no clipboard, no input.
+The honest version is the reverse of the original claim: **nvkvm's architecture
+already assumes an untrusted VMM** — unprivileged per-guest-process isolates, and
+a display broker built so the VMM never holds a display-server connection — so on
+that axis nvkvm is ahead of Kata's QEMU path and is positioned to contribute to
+it rather than consume it. See
+[00](docs/design/00-overview.md#what-nvkvm-brings-that-katas-qemu-path-lacks) and
+[06 — Confining the QEMU VMM](docs/design/06-vmm-confinement-design.md), which
+works out what confinement is actually available and recommends one.
 
 ## What the research changed
 
@@ -148,6 +175,7 @@ construction — removing nvkvm's usual version-matching machinery entirely.
 | [03 — Guest-side device nodes](docs/design/03-guest-side-devices.md) | the novel part; the smallest viable change and where it lands |
 | [04 — The guest kernel](docs/design/04-guest-kernel.md) | how `nvkvm-guest.ko` gets into Kata's guest |
 | [05 — Caveats and scope](docs/design/05-caveats-and-scope.md) | boot time, QEMU-only, and the multi-tenancy problem |
+| [06 — Confining the QEMU VMM](docs/design/06-vmm-confinement-design.md) | the options for confining the VMM, the capability analysis, and a staged recommendation |
 | [07 — End to end](docs/design/07-end-to-end.md) | **the run.** What worked, how to reproduce it, and the two findings that contradict 03 |
 | [Installing](docs/install.md) | **the installer, and the manual path it is a convenience over.** Nine numbered steps, the per-container selection mechanism, uninstall, and what it does *not* do |
 
@@ -163,5 +191,7 @@ plan without anyone noticing.
 
 ## Licence
 
-Documentation only; no code is distributed here. See `nvkvm` for the licence
-covering the components this design proposes to package.
+The design documents are the bulk of this repository; `scripts/` also carries the
+installer, the uninstaller, the QEMU shim and the CUDA proof program. See
+[nvkvm-pv](https://github.com/reindertpelsma/nvkvm-pv) for the licence covering
+the components this repository packages.
