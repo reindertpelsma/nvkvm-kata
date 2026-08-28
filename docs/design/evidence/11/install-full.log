@@ -1,0 +1,400 @@
+
+[nvkvm-kata] ===== stage 0/8  preflight =====
+[nvkvm-kata]   ok   Ubuntu 22.04.5 LTS (family: debian, packages: apt-get)
+[nvkvm-kata]   ok   /dev/kvm present (kvm)
+[nvkvm-kata]   ok   python3 present (Python 3.10.12)
+[nvkvm-kata]   ok   NVIDIA host driver 575.51.03
+[nvkvm-kata]   ok   cgroup v2
+[nvkvm-kata] WARNING: on cgroup v2 the container device cgroup is NOT enforced inside the guest
+[nvkvm-kata] WARNING:   (kata-agent computes the allowlist and cgroups-rs discards it --
+[nvkvm-kata] WARNING:    docs/design/07-end-to-end.md §8.1).  VISIBLE_CDI_DEVICES controls
+[nvkvm-kata] WARNING:    which device NODES are created, not access.  Do not rely on it as a boundary.
+[nvkvm-kata]   ok   Kata 4.1.0 at /opt/kata
+[nvkvm-kata]   ok   containerd v2.3.3
+[nvkvm-kata]   ok   docker 29.7.2 (>= 23, supports containerd shims as named runtimes)
+[nvkvm-kata]   ok   build dependencies present
+[nvkvm-kata]   ok   82 GB free on /var/lib/nvkvm-kata/build
+[nvkvm-kata]   ok   nvkvm-pv: /root/nvkvm-pv
+[nvkvm-kata]   ok   kata-containers source: /var/lib/nvkvm-kata/src/kata-containers
+[nvkvm-kata]   ok   yq: yq (https://github.com/mikefarah/yq/) version v4.44.5
+[nvkvm-kata]   ok   preflight passed
+
+[nvkvm-kata] ===== stage 1/8  Kata Containers =====
+[nvkvm-kata]   ok   already installed: Kata 4.1.0 at /opt/kata
+[nvkvm-kata]   ok   stock kata shim already on PATH
+[nvkvm-kata]   ok   stock /etc/kata-containers/configuration.toml present -- NOT touched
+
+[nvkvm-kata] ===== stage 2/8  nvkvm's QEMU =====
+[nvkvm-kata]   ok   already built: /opt/qemu-nvkvm/bin/qemu-system-x86_64
+[nvkvm-kata]   ok   /opt/qemu-nvkvm/bin/qemu-system-x86_64 has virtio-nvgpu (QEMU emulator version 11.1.1 (v11.1.1-dirty))
+
+[nvkvm-kata] ===== stage 3/8  guest kernel + nvkvm-guest.ko =====
+[nvkvm-kata]  CHANGED  building guest kernel (NVKVM_GRAPHICS=0, -j17)
+
+=== 1. install the nvkvm config fragment and widen -g to accept it ===
+  /var/lib/nvkvm-kata/src/kata-containers/tools/packaging/kernel/build-kernel.sh already accepts -g nvkvm
+
+=== 2. build the guest kernel (-g nvkvm) ===
+INFO: Config version: 202
+INFO: Kernel version: 6.18.35
+INFO: kernel path does not exist, will download kernel
+INFO: Download kernel checksum file: sha256sums.asc from https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+INFO: sha256sums.asc is valid, linux-6.18.35.tar.xz.sha256 generated
+INFO: Download kernel version 6.18.35
+INFO: Download kernel from: https://www.kernel.org/pub/linux/kernel/v6.x/linux-6.18.35.tar.xz
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+linux-6.18.35.tar.xz: OK
+INFO: Apply patches from /var/lib/nvkvm-kata/src/kata-containers/tools/packaging/kernel/patches/6.18.x
+INFO: Found 2 patches
+INFO: Apply /var/lib/nvkvm-kata/src/kata-containers/tools/packaging/kernel/patches/6.18.x/0001-fs-dax-check-zero-or-empty-entry-before-converting-xarray.patch
+patching file fs/dax.c
+INFO: Apply /var/lib/nvkvm-kata/src/kata-containers/tools/packaging/kernel/patches/6.18.x/0002-virtio-fs-use-sync-release-for-submounts.patch
+patching file fs/fuse/file.c
+INFO: Add kernel config for GPU due to '-g nvkvm'
+INFO: Remove existing config /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/.config.generated due to '-f'
+INFO: Constructing config from fragments: /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/.config.generated
+INFO: Copying config file from: /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/.config.generated
+#
+# No change to .config
+#
+INFO: Fetching NVIDIA driver source code
+Kernel source ready: /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202 
+INFO: Config version: 202
+INFO: Kernel version: 6.18.35
+  SYNC    include/config/auto.conf.cmd
+  GEN     arch/x86/include/generated/asm/orc_hash.h
+  WRAP    arch/x86/include/generated/uapi/asm/bpf_perf_event.h
+  WRAP    arch/x86/include/generated/uapi/asm/errno.h
+  WRAP    arch/x86/include/generated/uapi/asm/fcntl.h
+  SYSHDR  arch/x86/include/generated/uapi/asm/unistd_32.h
+  WRAP    arch/x86/include/generated/uapi/asm/ioctl.h
+  WRAP    arch/x86/include/generated/uapi/asm/ioctls.h
+  SYSHDR  arch/x86/include/generated/uapi/asm/unistd_64.h
+  WRAP    arch/x86/include/generated/uapi/asm/ipcbuf.h
+  WRAP    arch/x86/include/generated/uapi/asm/param.h
+  SYSHDR  arch/x86/include/generated/uapi/asm/unistd_x32.h
+  WRAP    arch/x86/include/generated/uapi/asm/poll.h
+  SYSTBL  arch/x86/include/generated/asm/syscalls_32.h
+  WRAP    arch/x86/include/generated/uapi/asm/resource.h
+  SYSHDR  arch/x86/include/generated/asm/unistd_32_ia32.h
+  UPD     include/generated/uapi/linux/version.h
+  SYSHDR  arch/x86/include/generated/asm/unistd_64_x32.h
+  WRAP    arch/x86/include/generated/uapi/asm/socket.h
+  WRAP    arch/x86/include/generated/uapi/asm/sockios.h
+  WRAP    arch/x86/include/generated/uapi/asm/termbits.h
+  WRAP    arch/x86/include/generated/uapi/asm/termios.h
+  SYSTBL  arch/x86/include/generated/asm/syscalls_64.h
+  WRAP    arch/x86/include/generated/uapi/asm/types.h
+  UPD     arch/x86/include/generated/asm/cpufeaturemasks.h
+  HOSTCC  arch/x86/tools/relocs_32.o
+  HOSTCC  arch/x86/tools/relocs_64.o
+  HOSTCC  arch/x86/tools/relocs_common.o
+  WRAP    arch/x86/include/generated/asm/early_ioremap.h
+  UPD     include/config/kernel.release
+  WRAP    arch/x86/include/generated/asm/fprobe.h
+  WRAP    arch/x86/include/generated/asm/mcs_spinlock.h
+  HOSTCC  scripts/kallsyms
+  WRAP    arch/x86/include/generated/asm/mmzone.h
+  HOSTCC  scripts/sorttable
+  WRAP    arch/x86/include/generated/asm/ring_buffer.h
+  HOSTCC  scripts/asn1_compiler
+  WRAP    arch/x86/include/generated/asm/irq_regs.h
+  UPD     include/generated/compile.h
+  WRAP    arch/x86/include/generated/asm/kmap_size.h
+  WRAP    arch/x86/include/generated/asm/local64.h
+  WRAP    arch/x86/include/generated/asm/mmiowb.h
+  WRAP    arch/x86/include/generated/asm/module.lds.h
+  UPD     include/generated/utsrelease.h
+  WRAP    arch/x86/include/generated/asm/rwonce.h
+  HOSTCC  scripts/selinux/mdp/mdp
+  DESCEND objtool
+  HOSTLD  arch/x86/tools/relocs
+  INSTALL /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libsubcmd/include/subcmd/exec-cmd.h
+  INSTALL /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libsubcmd/include/subcmd/help.h
+  INSTALL /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libsubcmd/include/subcmd/pager.h
+  INSTALL /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libsubcmd/include/subcmd/parse-options.h
+  INSTALL /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libsubcmd/include/subcmd/run-command.h
+  INSTALL libsubcmd_headers
+  CC      scripts/mod/empty.o
+  HOSTCC  scripts/mod/mk_elfconfig
+  CC      scripts/mod/devicetable-offsets.s
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libsubcmd/exec-cmd.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libsubcmd/help.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libsubcmd/pager.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libsubcmd/parse-options.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libsubcmd/run-command.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libsubcmd/sigchain.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libsubcmd/subcmd-config.o
+  UPD     scripts/mod/devicetable-offsets.h
+  MKELF   scripts/mod/elfconfig.h
+  HOSTCC  scripts/mod/modpost.o
+  HOSTCC  scripts/mod/file2alias.o
+  HOSTCC  scripts/mod/sumversion.o
+  HOSTCC  scripts/mod/symsearch.o
+  LD      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libsubcmd/libsubcmd-in.o
+  AR      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libsubcmd/libsubcmd.a
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/weak.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/check.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/arch/x86/special.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/special.o
+  MKDIR   /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/arch/x86/lib/
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/builtin-check.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/arch/x86/orc.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/elf.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/objtool.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/orc_gen.o
+  GEN     /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/arch/x86/lib/inat-tables.c
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/orc_dump.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libstring.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/libctype.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/str_error_r.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/librbtree.o
+  CC      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/arch/x86/decode.o
+  HOSTLD  scripts/mod/modpost
+  CC      kernel/bounds.s
+  CHKSHA1 include/linux/atomic/atomic-arch-fallback.h
+  CHKSHA1 include/linux/atomic/atomic-instrumented.h
+  CHKSHA1 include/linux/atomic/atomic-long.h
+  UPD     include/generated/timeconst.h
+  UPD     include/generated/bounds.h
+  CC      arch/x86/kernel/asm-offsets.s
+  LD      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/arch/x86/objtool-in.o
+  UPD     include/generated/asm-offsets.h
+  CC      kernel/sched/rq-offsets.s
+  UPD     include/generated/rq-offsets.h
+  CALL    scripts/checksyscalls.sh
+  LD      /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/objtool-in.o
+  LINK    /var/lib/nvkvm-kata/build/kata-linux-6.18.35-202/tools/objtool/objtool
+  LDS     scripts/module.lds
+  HOSTCC  usr/gen_init_cpio
+  AR      certs/built-in.a
+  CC      init/main.o
+  CC      ipc/util.o
+  CC      mm/filemap.o
+  CC      io_uring/io_uring.o
+  AS      arch/x86/lib/bhi.o
+  AR      sound/built-in.a
+  AS      arch/x86/boot/startup/la57toggle.o
+  CC      security/keys/gc.o
+  AR      drivers/cache/built-in.a
+  CC      block/partitions/core.o
+  AR      lib/kunit/built-in.a
+  CC      fs/iomap/trace.o
+  AR      fs/quota/built-in.a
+  CC      drivers/irqchip/irq-msi-lib.o
+  CC      fs/notify/dnotify/dnotify.o
+  CC      arch/x86/boot/startup/gdt_idt.o
+  CC      arch/x86/entry/vdso/vma.o
+  AR      drivers/bus/mhi/built-in.a
+  AR      lib/math/tests/built-in.a
+  AS      arch/x86/lib/clear_page_64.o
+  CC      kernel/sched/core.o
+  AR      drivers/bus/built-in.a
+  CC      lib/math/div64.o
+  CC      io_uring/opdef.o
+  CC      arch/x86/lib/cmdline.o
+  CC      crypto/api.o
+  CC      lib/math/gcd.o
+  AS      arch/x86/lib/cmpxchg16b_emu.o
+  CC      lib/math/lcm.o
+  GEN     usr/initramfs_data.cpio
+  CC      arch/x86/lib/copy_mc.o
+  COPY    usr/initramfs_inc_data
+  AS      usr/initramfs_data.o
+  CC      lib/math/int_log.o
+  CC      fs/iomap/iter.o
+  CC      arch/x86/boot/startup/map_kernel.o
+  AR      drivers/irqchip/built-in.a
+  AR      drivers/pwm/built-in.a
+  AR      usr/built-in.a
+  CC      io_uring/kbuf.o
+  AR      drivers/leds/blink/built-in.a
+  AR      drivers/leds/simatic/built-in.a
+  AS      arch/x86/lib/copy_mc_64.o
+  AR      drivers/leds/built-in.a
+  CC      lib/math/int_pow.o
+  AS      arch/x86/lib/copy_page_64.o
+  CC      drivers/pci/msi/pcidev_msi.o
+  CC      security/keys/key.o
+  AS      arch/x86/lib/copy_user_64.o
+  CC      lib/math/int_sqrt.o
+  AS      arch/x86/lib/copy_user_uncached_64.o
+  AR      fs/notify/dnotify/built-in.a
+  CC      block/partitions/msdos.o
+  CC      fs/notify/inotify/inotify_fsnotify.o
+  CC      arch/x86/lib/cpu.o
+  CC      lib/math/reciprocal_div.o
+  CC      drivers/video/console/dummycon.o
+  CC      arch/x86/entry/vdso/extable.o
+  AR      lib/math/built-in.a
+  AR      arch/x86/boot/startup/lib.a
+  CC      crypto/cipher.o
+  OBJCOPY arch/x86/boot/startup/gdt_idt.pi.o
+  AR      lib/crc/tests/built-in.a
+  OBJCOPY arch/x86/boot/startup/map_kernel.pi.o
+  AR      arch/x86/boot/startup/built-in.a
+  CC      lib/crc/crc16.o
+  AR      drivers/idle/built-in.a
+  CC      arch/x86/events/amd/core.o
+  CC      ipc/msgutil.o
+  AS      arch/x86/lib/csum-copy_64.o
+  UPD     init/utsversion-tmp.h
+  CC      init/do_mounts.o
+  CC      arch/x86/lib/csum-partial_64.o
+  CC      fs/iomap/buffered-io.o
+  CC      arch/x86/lib/csum-wrappers_64.o
+  HOSTCC  lib/crc/gen_crc32table
+  CC      fs/notify/inotify/inotify_user.o
+  AS      lib/crc/x86/crc32-pclmul.o
+  CC      drivers/pci/msi/api.o
+  AS      lib/crc/x86/crc32c-3way.o
+  AR      drivers/video/console/built-in.a
+  GEN     lib/crc/crc32table.h
+  CC      lib/crc/crc32-main.o
+  AR      drivers/video/backlight/built-in.a
+  AR      drivers/video/fbdev/core/built-in.a
+  AR      drivers/video/fbdev/omap/built-in.a
+  CC      block/partitions/efi.o
+  AR      drivers/video/fbdev/omap2/omapfb/dss/built-in.a
+  AR      drivers/video/fbdev/omap2/omapfb/displays/built-in.a
+  AR      drivers/video/fbdev/omap2/omapfb/built-in.a
+  AR      drivers/video/fbdev/omap2/built-in.a
+  CC      crypto/algapi.o
+  AR      drivers/video/fbdev/built-in.a
+  CC      mm/mempool.o
+  CC      drivers/video/screen_info_generic.o
+  CC      arch/x86/lib/delay.o
+  LDS     arch/x86/entry/vdso/vdso.lds
+  AS      arch/x86/entry/vdso/vdso-note.o
+  CC      security/keys/keyring.o
+  CC      arch/x86/entry/vdso/vclock_gettime.o
+  CC      drivers/video/screen_info_pci.o
+  CC      ipc/msg.o
+  AR      lib/crc/built-in.a
+  CC      lib/crypto/memneq.o
+  AS      arch/x86/lib/getuser.o
+  GEN     arch/x86/lib/inat-tables.c
+  CC      arch/x86/lib/insn-eval.o
+  CC      arch/x86/events/amd/lbr.o
+  CC      drivers/pci/msi/msi.o
+  CC      arch/x86/entry/vdso/vgetcpu.o
+  CC      arch/x86/entry/vdso/vgetrandom.o
+  AR      fs/notify/inotify/built-in.a
+  CC      fs/notify/fanotify/fanotify.o
+  CC      lib/crypto/utils.o
+  CC      init/do_mounts_rd.o
+  AR      block/partitions/built-in.a
+  CC      block/bdev.o
+  CC      init/do_mounts_initrd.o
+  AR      drivers/video/built-in.a
+  CC      init/initramfs.o
+  CC      mm/oom_kill.o
+  CC      io_uring/rsrc.o
+  AS      arch/x86/entry/vdso/vgetrandom-chacha.o
+  AS      arch/x86/entry/vdso/vsgx.o
+  HOSTCC  arch/x86/entry/vdso/vdso2c
+  CC      lib/crypto/aes.o
+  CC      fs/iomap/direct-io.o
+  CC      arch/x86/lib/insn.o
+  CC      security/keys/keyctl.o
+  CC      ipc/sem.o
+  CC      crypto/scatterwalk.o
+  CC      arch/x86/events/amd/ibs.o
+  VDSO    arch/x86/entry/vdso/vdso64.so.dbg
+  OBJCOPY arch/x86/entry/vdso/vdso64.so
+  VDSO2C  arch/x86/entry/vdso/vdso-image-64.c
+  CC      arch/x86/entry/vdso/vdso-image-64.o
+  CC      kernel/sched/fair.o
+  CC      drivers/pci/msi/irqdomain.o
+  CC      fs/notify/fanotify/fanotify_user.o
+  CC      fs/proc/task_mmu.o
+  CC      arch/x86/lib/kaslr.o
+  CC      lib/crypto/arc4.o
+  CC      fs/kernfs/mount.o
+  AR      arch/x86/entry/vdso/built-in.a
+  AR      arch/x86/entry/vsyscall/built-in.a
+  AS      arch/x86/entry/entry.o
+  AS      arch/x86/entry/entry_64.o
+  CC      init/calibrate.o
+  CC      arch/x86/entry/syscall_64.o
+  AS      arch/x86/lib/memcpy_64.o
+  AS      arch/x86/lib/memmove_64.o
+  AS      arch/x86/lib/memset_64.o
+  CC      arch/x86/lib/misc.o
+  CC      block/fops.o
+  CC      lib/crypto/gf128mul.o
+  CC      arch/x86/lib/pc-conf-reg.o
+  CC      mm/fadvise.o
+  CC      init/init_task.o
+  AS      arch/x86/lib/putuser.o
+  CC      fs/iomap/ioend.o
+  AS      arch/x86/lib/retpoline.o
+  CC      arch/x86/lib/usercopy.o
+  CC      crypto/proc.o
+  CC      io_uring/notif.o
+  AR      drivers/pci/msi/built-in.a
+  CC      drivers/pci/pcie/portdrv.o
+  CC      lib/crypto/blake2s.o
+  CC      fs/kernfs/inode.o
+  AR      arch/x86/events/amd/built-in.a
+  CC      arch/x86/events/intel/core.o
+  CC      security/keys/permission.o
+  CC      arch/x86/lib/usercopy_64.o
+  CC      init/version.o
+  CC      ipc/shm.o
+  AR      arch/x86/entry/built-in.a
+  CC      arch/x86/events/zhaoxin/core.o
+  AR      fs/notify/fanotify/built-in.a
+  CC      fs/notify/fsnotify.o
+  CC      mm/maccess.o
+  CC      block/bio.o
+  CC      crypto/aead.o
+  CC      fs/iomap/fiemap.o
+  AS      lib/crypto/x86/blake2s-core.o
+  CC      drivers/pci/pcie/rcec.o
+  CC      lib/crypto/chacha-block-generic.o
+  CC      arch/x86/lib/msr-smp.o
+  AR      init/built-in.a
+  CC      kernel/locking/mutex.o
+  CC      lib/crypto/md5.o
+  CC      security/keys/process_keys.o
+  CC      fs/proc/inode.o
+  CC      io_uring/tctx.o
+  CC      arch/x86/lib/cache-smp.o
+  CC      fs/kernfs/dir.o
+  CC      fs/iomap/seek.o
+  CC      arch/x86/lib/msr.o
+  CC      mm/page-writeback.o
+  AR      arch/x86/events/zhaoxin/built-in.a
+  CC      fs/notify/notification.o
+  CC      kernel/power/qos.o
+  CC      drivers/pci/pcie/bwctrl.o
+  CC      crypto/geniv.o
+  CC      ipc/syscall.o
+  CC      lib/crypto/sha1.o
+  AS      arch/x86/lib/msr-reg.o
+  CC      arch/x86/lib/msr-reg-export.o
+  CC      fs/proc/root.o
+  CC      kernel/locking/semaphore.o
+  CC      fs/iomap/swapfile.o
+  CC      io_uring/filetable.o
+  AS      arch/x86/lib/hweight.o
+  CC      security/keys/request_key.o
+  CC      arch/x86/lib/iomem.o
+  CC      block/elevator.o
+  CC      fs/notify/group.o
+  CC      drivers/pci/pcie/aspm.o
+  AS      lib/crypto/x86/sha1-ssse3-and-avx.o
+  AS      lib/crypto/x86/sha1-avx2-asm.o
+  CC      kernel/power/process.o
+  AS      lib/crypto/x86/sha1-ni-asm.o
+  CC      lib/crypto/sha256.o
+  CC      ipc/ipc_sysctl.o
+  CC      arch/x86/lib/inat.o
+  CC      fs/kernfs/file.o
+  AR      arch/x86/lib/built-in.a
+  AR      arch/x86/lib/lib.a
+  CC      crypto/lskcipher.o

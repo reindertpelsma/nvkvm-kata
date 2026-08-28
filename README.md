@@ -83,6 +83,16 @@ container before your process starts. `--gpus 1`, `--gpus '"device=0"'` and
 `--gpus '"device=GPU-<uuid>"'` select devices exactly as they do under
 `nvidia-container-toolkit`.
 
+Docker has **two** ways of answering `--gpus`, and both end up here. On a
+current host, `nvidia-container-toolkit` enables `nvidia-cdi-refresh` by
+default, and the *daemon* resolves `--gpus all` through CDI before a runtime is
+chosen — handing the shim host device nodes and a bind mount of a UNIX socket
+that cannot cross virtio-fs. That is the default configuration of a stock
+Ubuntu + NVIDIA box, and it is recognised and undone rather than refused:
+[09 §8c](docs/design/09-gpu-libraries-automatically.md#8c-docker-has-a-second---gpus-path-and-it-is-now-the-default-one),
+tested in both configurations in
+[evidence/11](docs/design/evidence/11/README.md).
+
 Compose says the same thing:
 
 ```yaml

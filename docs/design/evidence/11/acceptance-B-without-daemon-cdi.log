@@ -1,0 +1,88 @@
+############ ACCEPTANCE [B-WITHOUT-daemon-CDI] ############
+--- daemon CDI state ---
+DAEMON CDI: ABSENT
+=== [1] the acceptance command, verbatim ===
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 13.3.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+Fri Aug 28 15:30:11 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 575.51.03              Driver Version: 575.51.03      CUDA Version: 12.9     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 4070 Ti     Off |   00000000:00:07.0 Off |                  N/A |
+|  0%   31C    P8             14W /  285W |       1MiB /  12282MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A               1  M+C+G   nvidia-smi                                0MiB |
++-----------------------------------------------------------------------------------------+
+acceptance-1 rc=0
+=== [2] nvidia-smi AND a real CUDA compute proof, same container ===
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 13.3.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+Fri Aug 28 15:30:17 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 575.51.03              Driver Version: 575.51.03      CUDA Version: 12.9     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 4070 Ti     Off |   00000000:00:07.0 Off |                  N/A |
+|  0%   31C    P8             14W /  285W |       1MiB /  12282MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A              33  M+C+G   nvidia-smi                                0MiB |
++-----------------------------------------------------------------------------------------+
+--- building the CUDA driver-API proof ---
+--- running it ---
+devices: 1
+device 0: NVIDIA GeForce RTX 4070 Ti
+elements: 1048576  mismatches: 0  sample: c[7]=21.0 (want 21.0)
+VECADD OK
+acceptance-2 rc=0
+=== [3] what the injector saw (proves WHICH --gpus path was taken) ===
+2026-08-28T15:30:05Z 5e4c490d7e0509f8ce907b958ec54495fd891593c5d8d100b279e579c4a11cd2 NVIDIA_VISIBLE_DEVICES=all -> VISIBLE_CDI_DEVICES=nvidia.com/gpu=all, +82 mounts, -1 host hooks, capabilities=compute,utility (recorded, not filtered: CDI mode is capability-complete)
+2026-08-28T15:30:12Z 671635c7f26da38fe8eb500b4d6406caefd0ae4ed20013128ca27de9737ff276 NVIDIA_VISIBLE_DEVICES=all -> VISIBLE_CDI_DEVICES=nvidia.com/gpu=all, +82 mounts, -1 host hooks, capabilities=compute,utility (recorded, not filtered: CDI mode is capability-complete)
+=== [B-WITHOUT-daemon-CDI] RESULT: acceptance-1 rc=0  acceptance-2 rc=0 ===
+[B-WITHOUT-daemon-CDI] PASS

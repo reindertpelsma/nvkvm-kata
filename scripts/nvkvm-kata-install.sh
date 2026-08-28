@@ -63,6 +63,11 @@ set -uo pipefail
 # ── constants ────────────────────────────────────────────────────────────────
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
+# The driver-version rule, shared with gpu-cdi.py.  Sourced rather than
+# retyped: the injector re-derives this on every container start and refuses to
+# run if it disagrees with what the installer recorded.
+# shellcheck source=lib/driver-version.sh
+. "$HERE/lib/driver-version.sh"
 STATE=/var/lib/nvkvm-kata
 ARTIFACTS="$STATE/build"
 BACKUP="$STATE/backup"
@@ -119,6 +124,31 @@ while [ $# -gt 0 ]; do
     esac
 done
 [ ${#STAGES[@]} -eq 0 ] && STAGES=(kata qemu kernel rootfs runtime engine libs verify)
+
+# ── which QEMU the shim will exec ────────────────────────────────────────────
+# Resolved HERE, at parse time, and deliberately NOT inside stage_qemu().
+#
+# It used to be resolved inside that stage, which meant --qemu was silently
+# ignored whenever the qemu stage did not run.  `--only runtime --qemu /path`
+# therefore wrote the DEFAULT path into /etc/nvkvm-kata/shim.env.  That is not a
+# loud failure: stage 5 asserts only that SOME executable is at the default
+# path, and on a host that already has an unrelated /opt/qemu-nvkvm -- a
+# different nvkvm-pv lineage, a distro QEMU, an older build -- the assertion
+# passes.  You get a VM that boots perfectly on the wrong hypervisor and says
+# nothing, and the two halves disagree about src/abi/nvgpu.h in ways that
+# surface much later as garbage.  MEASURED 2026-08-28 on a host carrying a
+# pre-existing QEMU 9.2.0 at that path.
+#
+# A flag that is accepted must take effect regardless of which stages run.
+NVKVM_QEMU_PATH=/opt/qemu-nvkvm/bin/qemu-system-x86_64
+QEMU_EXPLICIT=0
+if [ -n "$QEMU_BIN" ]; then
+    [ -x "$QEMU_BIN" ] || die "--qemu $QEMU_BIN is not executable" \
+        "point it at a built qemu-system-x86_64"
+    # Absolute: the shim exec()s this from a different working directory.
+    NVKVM_QEMU_PATH="$(cd "$(dirname "$QEMU_BIN")" && pwd)/$(basename "$QEMU_BIN")"
+    QEMU_EXPLICIT=1
+fi
 
 want() { local s; for s in "${STAGES[@]}"; do [ "$s" = "$1" ] && return 0; done; return 1; }
 
@@ -309,19 +339,35 @@ preflight() {
     [ -r /dev/kvm ] && [ -w /dev/kvm ] || die "/dev/kvm is not read-write for root" "check ownership/permissions on /dev/kvm"
     ok "/dev/kvm present ($(systemd-detect-virt 2>/dev/null || echo 'virt unknown'))"
 
+    # python3 is GLOBAL, not a build dependency.  Three helpers here are Python
+    # -- kata-conf-edit.py (stage 5), docker-runtime.py (stage 6) and
+    # lib/gpu-cdi.py -- and gpu-cdi.py runs from the shim on EVERY container
+    # start, forever.  A host without python3 cannot run a GPU container at all,
+    # whichever stages were used to install.
+    #
+    # It used to be asserted only under `want qemu || kernel || rootfs || libs`,
+    # so `--only runtime` or `--only engine` failed deep inside a stage instead
+    # of here.  That is the same shape as the `--qemu`-ignored-unless-the-qemu-
+    # stage-ran bug fixed earlier: a dependency guarded by the wrong stage.
+    #
+    # tomllib/tomli is NOT checked here on purpose -- that one really is
+    # build-only (QEMU 11's configure parses pyproject.toml), and our own
+    # helpers use nothing outside the standard library.
+    command -v python3 >/dev/null 2>&1 \
+        || die "python3 is required but not installed" \
+               "install the $(pkg_for python3) package for your distro"
+    ok "python3 present ($(python3 --version 2>&1))"
+
     # NVIDIA driver.  Read /proc, not nvidia-smi: nvidia-smi can fail for
     # reasons that have nothing to do with the driver being loaded.
     [ -r /proc/driver/nvidia/version ] || die \
         "no NVIDIA driver loaded (/proc/driver/nvidia/version is absent)" \
         "install the NVIDIA driver on the HOST; nvkvm forwards to it and never unbinds it"
-    # Take the first dotted number on the line, NOT the token after "Kernel
-    # Module".  The open kernel module writes
-    #   NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  580.95.05 ...
-    # where the proprietary one writes
-    #   NVRM version: NVIDIA UNIX x86_64 Kernel Module  575.51.03 ...
-    # so anchoring on "Kernel Module" yields "for" on an open-module host and
-    # the installer dies on a perfectly good driver.  MEASURED 2026-08-28.
-    DRIVER_VERSION="$(grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)+' /proc/driver/nvidia/version | head -1)"
+    # How the version is parsed is subtle enough, and has broken enough real
+    # installs, to live in one sourceable file with its evidence: see
+    # scripts/lib/driver-version.sh.  It is the SAME rule gpu-cdi.py applies on
+    # every container start, and `gpu-cdi.py self-test` asserts the two agree.
+    DRIVER_VERSION="$(nvkvm_driver_version)"
     [ -n "$DRIVER_VERSION" ] || die "could not parse the driver version out of /proc/driver/nvidia/version" \
         "cat it and report the format"
     ok "NVIDIA host driver $DRIVER_VERSION"
@@ -432,7 +478,7 @@ preflight() {
         # "ERROR: missing build dependencies: xxd".  MEASURED on Arch,
         # 2026-08-28.  Satisfying it here means that never happens.
         _need xxd xxd
-        _need losetup losetup ; _need python3 python3
+        _need losetup losetup
         _need patch patch ; _need file file
         # bc and rsync are needed by the KERNEL build, not by us, and their
         # absence surfaces two minutes in as an unattributable make error.
@@ -628,15 +674,15 @@ stock_kata_config() {
 # ═════════════════════════════════════════════════════════════════════════════
 # STAGE 2 -- QEMU.  docs/install.md §2
 # ═════════════════════════════════════════════════════════════════════════════
-NVKVM_QEMU_PATH=/opt/qemu-nvkvm/bin/qemu-system-x86_64
 stage_qemu() {
     # build_qemu.sh installs its own dependencies, and on EL9 half of them are
     # in CRB.  Enable it here too: --only qemu skips preflight's dep block.
     [ "$DO_INSTALL_DEPS" = 1 ] && enable_extra_repos
     step "stage 2/8  nvkvm's QEMU"
-    if [ -n "$QEMU_BIN" ]; then
-        [ -x "$QEMU_BIN" ] || die "--qemu $QEMU_BIN is not executable" "point it at a built qemu-system-x86_64"
-        NVKVM_QEMU_PATH="$QEMU_BIN"
+    if [ "$QEMU_EXPLICIT" = 1 ]; then
+        # Already resolved and checked at parse time.  An explicitly supplied
+        # binary is never rebuilt over, not even under --force.
+        ok "using --qemu $NVKVM_QEMU_PATH"
     elif [ -x "$NVKVM_QEMU_PATH" ] && [ "$FORCE" = 0 ]; then
         ok "already built: $NVKVM_QEMU_PATH"
     else
