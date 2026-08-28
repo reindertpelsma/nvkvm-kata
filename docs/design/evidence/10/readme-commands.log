@@ -1,0 +1,31 @@
+
+### sudo scripts/nvkvm-kata-install.sh --install-kata --install-deps   (idempotent re-run)
+   -> OK
+   PASS count: 6
+
+### docker run --runtime=nvkvm-kata --gpus all --rm nvidia/cuda:13.3.1-cudnn-devel-ubuntu26.04 nvidia-smi
+| NVIDIA-SMI 580.173.02             Driver Version: 580.173.02     CUDA Version: 13.0     |
+|   0  NVIDIA GeForce RTX 4070 ...    Off |   00000000:00:07.0 Off |                  N/A |
+   -> OK
+
+### docker compose -f examples/docker-compose.yml up --abort-on-container-exit smi
+smi-1  | |   0  NVIDIA GeForce RTX 4070 ...    Off |   00000000:00:07.0 Off |                  N/A |
+[Ksmi-1 exited with code 0
+   -> OK
+
+### ctr run --rm --runtime io.containerd.nvkvm-kata.v2 --runtime-config-path ... --env NVIDIA_VISIBLE_DEVICES=all ubuntu:24.04 gpu0 nvidia-smi
+| NVIDIA-SMI 580.173.02             Driver Version: 580.173.02     CUDA Version: 13.0     |
+|   0  NVIDIA GeForce RTX 4070 ...    Off |   00000000:00:07.0 Off |                  N/A |
+   -> OK
+
+### --gpus 1
+GPU 0: NVIDIA GeForce RTX 4070 Ti SUPER (UUID: GPU-01aa53e7-5942-8607-6abb-2e2376f4cc51)
+   -> OK
+
+### --gpus "device=0"
+GPU 0: NVIDIA GeForce RTX 4070 Ti SUPER (UUID: GPU-01aa53e7-5942-8607-6abb-2e2376f4cc51)
+   -> OK
+
+### --gpus "device=GPU-01aa53e7-5942-8607-6abb-2e2376f4cc51"
+GPU 0: NVIDIA GeForce RTX 4070 Ti SUPER (UUID: GPU-01aa53e7-5942-8607-6abb-2e2376f4cc51)
+   -> OK

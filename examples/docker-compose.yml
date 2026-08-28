@@ -1,6 +1,6 @@
 # nvkvm-kata: selecting the runtime per container.
 #
-#   docker compose -f examples/docker-compose.yml up --abort-on-container-exit cuda
+#   docker compose -f examples/docker-compose.yml up --abort-on-container-exit smi
 #
 # USE `up`, NOT `run`.  `docker compose run` attaches the container's stdin, and
 # stdin-attach is broken for Kata on Docker 28.1.1 -- MEASURED, and measured
@@ -15,45 +15,55 @@
 # See docs/design/evidence/08/stdin-attach-control.log.  `up`, `up -d` and
 # plain `docker run` are unaffected.
 #
-# The only line that selects nvkvm is `runtime:`.  Everything else in this file
-# is ordinary compose.  Change it to `runtime: runc` (or delete it) and the same
-# service runs on the host's default runtime with no GPU -- which is the point:
-# stock Kata and runc are untouched and still work.
+# TWO lines select the whole thing: `runtime:` picks the VM+GPU runtime, and the
+# `deploy.resources.reservations.devices` block is compose's spelling of
+# `--gpus all`.  There is deliberately NO `volumes:` for driver libraries and NO
+# LD_LIBRARY_PATH: the host driver's userspace arrives on its own, and ldconfig
+# has run inside the container before your command does.
+# See docs/design/09-gpu-libraries-automatically.md.
+#
+# Change `runtime:` to `runc` (or delete it) and the same service runs on the
+# host's default runtime -- which is the point: stock Kata and runc are
+# untouched and still work.
+
+x-gpu: &gpu
+  runtime: nvkvm-kata
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all            # or `device_ids: ["0"]`, like --gpus '"device=0"'
+            capabilities: [gpu]
+
 services:
+
+  # A stock NVIDIA CUDA image, unmodified, doing the obvious thing.
+  smi:
+    <<: *gpu
+    image: nvidia/cuda:13.3.1-cudnn-devel-ubuntu26.04
+    command: nvidia-smi
 
   # The proof.  A CUDA vector-add on the driver API with embedded PTX, so it
   # needs no CUDA toolkit in the image.  Prints VECADD OK.
+  # The one bind mount is the TEST BINARY, not driver libraries.
   cuda:
+    <<: *gpu
     image: ubuntu:24.04
-    runtime: nvkvm-kata
     command: /usr/local/nvidia/bin/vecadd
-    environment:
-      # Which CDI device the guest should materialise inside the container.
-      # NOTE: on cgroup v2 this decides which device NODES are created for you.
-      # It is NOT an access boundary -- docs/design/07-end-to-end.md 8.1.
-      VISIBLE_CDI_DEVICES: nvidia.com/gpu=0
-      # Kata drops CDI's hooks (kata#11169), so nothing runs ldconfig in here.
-      LD_LIBRARY_PATH: /usr/local/nvidia/lib
     volumes:
-      # The HOST driver's own userspace, staged by the installer.  It must match
-      # the host driver exactly -- the host driver services every forwarded ioctl.
-      - /opt/nvkvm-kata/nvidia/lib:/usr/local/nvidia/lib:ro
       - /opt/nvkvm-kata/nvidia/bin:/usr/local/nvidia/bin:ro
 
-  # Same thing with nvidia-smi, for a look at the card from inside the VM.
-  smi:
-    image: ubuntu:24.04
+  # Control: the same runtime, no GPU requested.  Shows that asking is required
+  # -- though note it is NOT an access boundary on cgroup v2, see
+  # docs/design/07-end-to-end.md 8.1.
+  no-gpu:
     runtime: nvkvm-kata
-    command: /usr/local/nvidia/bin/nvidia-smi
-    environment:
-      VISIBLE_CDI_DEVICES: nvidia.com/gpu=0
-      LD_LIBRARY_PATH: /usr/local/nvidia/lib
-    volumes:
-      - /opt/nvkvm-kata/nvidia/lib:/usr/local/nvidia/lib:ro
-      - /opt/nvkvm-kata/nvidia/bin:/usr/local/nvidia/bin:ro
+    image: ubuntu:24.04
+    command: /bin/sh -c 'uname -r; ls /dev/nvidia* 2>&1 || echo "no nvidia nodes (expected)"'
 
-  # Control: the same image on the host's default runtime.  No GPU, no VM.
-  # Useful when something fails and you need to know which layer broke.
+  # Control: the host's default runtime.  No GPU, no VM.  Useful when something
+  # fails and you need to know which layer broke.
   control:
     image: ubuntu:24.04
     command: /bin/sh -c 'uname -r; ls /dev/nvidia* 2>&1 || echo "no nvidia nodes (expected)"'

@@ -1,0 +1,12 @@
+host: Ubuntu 22.04.5 LTS  driver: 580.173.02
+version    installs shape   mounts  symlinks  soname   libcuda.so.1 / nvidia-smi / ld.conf
+1.14.6     yes      OK      68      1         20       True/True/True
+1.15.0     yes      OK      68      1         20       True/True/True
+1.16.0     yes      OK      71      2         21       True/True/True
+1.16.2     yes      OK      71      2         21       True/True/True
+1.17.0     yes      OK      76      5         22       True/True/True
+1.17.8     yes      OK      76      5         22       True/True/True
+1.18.0     yes      OK      85      14        22       True/True/True
+1.19.1     yes      OK      85      14        22       True/True/True
+1.20.0     yes      OK      88      15        22       True/True/True
+restored: NVIDIA Container Toolkit CLI version 1.20.0

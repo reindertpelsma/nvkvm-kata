@@ -1,5 +1,28 @@
 # 02 — Host NVIDIA libraries into the container, via CDI
 
+> **RESOLVED, 2026-08-28 — read [09](09-gpu-libraries-automatically.md) with
+> this document.** Three of this document's open questions were settled by
+> measurement, and one of its recommendations was overtaken:
+>
+> - **§D's pivotal UNVERIFIED — "whether kata-agent actually executes hooks
+>   arriving via the guest CDI path" — is now VERIFIED, positively.** It does
+>   (`src/agent/rustjail/src/container.rs:621-632`), in the container's mount
+>   namespace, before `pivot_root`. So §D option 3 is the one that ships, and
+>   §D option 2 ("replace `update-ldcache` with `LD_LIBRARY_PATH`") is
+>   **withdrawn** — it was the manual step this project has since removed.
+> - **§A's UNVERIFIED request for literal generated YAML is answered**:
+>   [`evidence/09/nvidia-ctk-cdi-generate.json`](evidence/09/nvidia-ctk-cdi-generate.json)
+>   is a committed fixture from a real driver host. It shows something §A gets
+>   slightly wrong: `create-symlinks` does **not** emit the SONAME links.
+>   `libcuda.so.1` is made by `ldconfig`, from `update-ldcache`.
+> - **§C.1's UNVERIFIED symlink-chain question** was already answered in
+>   [07 §6](07-end-to-end.md#6-rung-4--nvidia-smi); 09 adds that a *file*
+>   mounted at a SONAME path works just as well as a symlink.
+> - The split this document recommends is exactly what shipped, with the
+>   `mounts` half generated on the host by `nvidia-ctk` and the `deviceNodes`
+>   half generated in the guest — but the split is performed by
+>   `scripts/lib/gpu-cdi.py`, per container, not by `split-cdi-spec.sh`.
+
 All upstream citations in this document are against
 `kata-containers/kata-containers` @ **`f62ecce`**,
 `cncf-tags/container-device-interface` @ **`23b69d2`**,

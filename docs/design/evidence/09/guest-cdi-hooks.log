@@ -1,0 +1,67 @@
+================================================================================
+THE PIVOTAL MEASUREMENT
+Does kata-agent execute createContainer hooks that arrive on a CDI spec found
+INSIDE the guest?   Kata 4.1.0, guest kernel 6.18.35-nvkvm, 2026-08-28.
+ANSWER: YES.  No patch to the Kata runtime, shim, agent or rustjail.
+================================================================================
+
+--- the setup -------------------------------------------------------------
+The guest-side generator (/usr/local/bin/nvkvm-guest-cdi-gen, run from a
+modprobe.d `install` directive when kata-agent modprobes nvkvm-guest) was made
+to emit one extra field in /var/run/cdi/nvkvm.yaml:
+
+  containerEdits:
+    deviceNodes:
+      - path: "/dev/nvidiactl"
+      ...
+    hooks:
+      - hookName: createContainer
+        path: /usr/local/bin/nvkvm-hook-probe
+        args: ["nvkvm-hook-probe", "probe"]
+
+/usr/local/bin/nvkvm-hook-probe touches a marker inside the container's rootfs:
+
+  for c in /run/kata-containers/*/rootfs; do
+    [ -d "$c" ] && touch "$c/NVKVM_HOOK_RAN"
+  done
+
+--- the run ---------------------------------------------------------------
+$ docker run --runtime=nvkvm-kata -e VISIBLE_CDI_DEVICES=nvidia.com/gpu=0 \
+      --rm ubuntu:24.04 sh -c "ls -l /NVKVM_HOOK_RAN 2>&1; ls /dev/nvidia* 2>&1"
+-rw-r--r-- 1 root root 0 Aug 28 02:33 /NVKVM_HOOK_RAN
+/dev/nvidia-uvm
+/dev/nvidia-uvm-tools
+/dev/nvidia0
+/dev/nvidiactl
+rc=0
+
+The marker is INSIDE the container.  The hook ran, in the container's mount
+namespace, after the rootfs was assembled and before pivot_root -- which is
+exactly the contract `nvidia-cdi-hook update-ldcache` needs.
+
+--- why this is the deciding measurement ----------------------------------
+Host-injected hooks are deleted before the agent ever sees the spec:
+
+  src/runtime/virtcontainers/kata_agent.go:1055  constrainGRPCSpec()
+      // Disable Hooks since they have been handled on the host and there is
+      // no reason to send them to the agent.
+      grpcSpec.Hooks = nil
+
+Guest-resident ones are not.  They arrive through handle_cdi_devices()
+(src/agent/src/device/mod.rs), land in the container spec, and are executed by
+
+  src/agent/rustjail/src/container.rs:621-632
+      // CreateContainer Hooks:
+      // before pivot_root after prestart, createruntime
+      create_container_states.execute_hooks(hooks.create_container()..., state)
+
+so docs/design/02-libraries-via-cdi.md sec D option 3 -- "regenerate the spec in
+the guest ... UNVERIFIED: whether kata-agent actually executes hooks arriving
+via the guest CDI path" -- is now VERIFIED, positively.
+
+--- what the guest rootfs has to work with --------------------------------
+(loop-mounted kata-nvkvm.image, Ubuntu 24.04 noble)
+  chroot:   /sbin/chroot        present
+  ldconfig: /sbin/ldconfig      present
+  sh:       /bin/sh             present
+  sed:      /bin/sed            present

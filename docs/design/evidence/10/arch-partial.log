@@ -1,0 +1,66 @@
+=== distro under test ===
+NAME="Arch Linux"
+PRETTY_NAME="Arch Linux"
+=== containerd/nvidia-ctk present? ===
+/usr/sbin/containerd
+/usr/sbin/nvidia-ctk
+NVIDIA Container Toolkit CLI version 1.20.0
+############ STAGE 0 + 2 + 3: preflight, QEMU build, guest kernel ############
+make[1]: Leaving directory '/var/lib/nvkvm-kata/build/kata-linux-6.18.35-202'
+make: Leaving directory '/work-pv/src/guest'
+
+=== 5. depmod  <-- THE STEP KATA'S OWN TOOLING OMITS ===
+
+=== 6. verify the module is actually resolvable ===
+  modules.dep entry : updates/nvkvm-guest.ko:
+  module            : /var/lib/nvkvm-kata/build/modules/lib/modules/6.18.35-nvkvm/updates/nvkvm-guest.ko (173968 bytes)
+filename:       /var/lib/nvkvm-kata/build/modules/lib/modules/6.18.35-nvkvm/updates/nvkvm-guest.ko
+version:        0.1.0
+description:    NVIDIA GPU passthrough for KVM guests via virtio-nvgpu
+author:         nvkvm contributors
+license:        GPL
+srcversion:     218D3DB8E6E9D15A67C4574
+depends:        
+name:           nvkvm_guest
+retpoline:      Y
+vermagic:       6.18.35-nvkvm SMP mod_unload 
+parm:           num_gpus:Number of /dev/nvidia* devices to expose (default -1 = autodetect from the host) (int)
+parm:           ring_idle_us:stub consumer-loop idle window in spin iters (0=default; capped in stub) (uint)
+
+=== 7. stage the kernel image ===
+
+=== done ===
+  kernel  : /var/lib/nvkvm-kata/build/vmlinuz-6.18.35-nvkvm
+  modules : /var/lib/nvkvm-kata/build/modules/lib/modules/6.18.35-nvkvm  (depmod'd)
+  release : 6.18.35-nvkvm
+
+Next: scripts/inject-guest-modules.sh --image <kata rootfs image> --modules /var/lib/nvkvm-kata/build/modules
+[nvkvm-kata]   ok   guest kernel 6.18.35-nvkvm, module depmod'd and resolvable
+
+[nvkvm-kata] ===== done =====
+[nvkvm-kata]
+[nvkvm-kata]   Select it per container.  Nothing global changed:
+[nvkvm-kata]
+[nvkvm-kata]     docker run --runtime=nvkvm-kata --gpus all --rm \
+[nvkvm-kata]         nvidia/cuda:13.3.1-cudnn-devel-ubuntu26.04 nvidia-smi
+[nvkvm-kata]
+[nvkvm-kata]   No volume, no LD_LIBRARY_PATH, no VISIBLE_CDI_DEVICES.  The host driver's
+[nvkvm-kata]   userspace arrives on its own and ldconfig has run inside the container
+[nvkvm-kata]   before your command does.  --gpus 1 / --gpus '"device=0"' /
+[nvkvm-kata]   --gpus '"device=GPU-<uuid>"' select devices the way the toolkit does.
+[nvkvm-kata]
+[nvkvm-kata]   (examples/docker-compose.yml is the compose spelling, ready to run.)
+[nvkvm-kata]   Revert everything:  scripts/nvkvm-kata-uninstall.sh
+############ STAGE 7: discovery against the real GPU ############
+[nvkvm-kata]   ok   stock kata shim already on PATH
+[nvkvm-kata]   ok   stock /etc/kata-containers/configuration.toml present -- NOT touched
+
+[nvkvm-kata] ===== stage 4/8  guest rootfs (kmod + CDI generator + the module) =====
+[nvkvm-kata]  CHANGED  copying stock rootfs kata-ubuntu-noble.image -> kata-nvkvm.image
+  fetching http://archive.ubuntu.com/ubuntu/pool/main/k/kmod/kmod_31+20240202-2ubuntu7_amd64.deb
+harvested kmod: 174328 bytes, libs: 
+mount: /mnt/nvkvm-prep: wrong fs type, bad option, bad superblock on /dev/loop5, missing codepage or helper program, or other error.
+       dmesg(1) may have more information after failed mount system call.
+
+[nvkvm-kata] FATAL: prepare-guest-rootfs.sh failed
+[nvkvm-kata]   fix: docs/install.md §4a

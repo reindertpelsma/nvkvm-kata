@@ -44,43 +44,129 @@ docs claim.
 
 ## Install it
 
+One script, source to installed, on a **fresh host**:
+
 ```bash
 sudo scripts/nvkvm-kata-install.sh --install-kata --install-deps
 ```
 
-One script, source to installed. Afterwards the choice is **per container** —
-stock Kata and `runc` are untouched and still work:
+It builds nvkvm's QEMU and a guest kernel, fetches Kata, registers a second
+runtime, and **ends by running a CUDA workload on the runtime it just
+registered** — installed-but-broken is never reported as success.
+`scripts/nvkvm-kata-uninstall.sh` puts the host back from a manifest written
+during the install.
+
+**Requirements.** A GPU host with `/dev/kvm`, the NVIDIA driver loaded,
+**containerd**, and **nvidia-container-toolkit** (≥ 1.14.6). The toolkit is
+required and deliberately *not* installed for you — setting up NVIDIA's package
+repository on your host is your decision, and preflight names the exact command
+for your distribution if it is missing. Everything else `--install-deps` handles,
+per distribution.
+
+**Docker is not required.** containerd is the baseline, because a Kubernetes
+node or a podman host has containerd and no Docker — the install and its proof
+both run through `ctr` when Docker is absent. Docker, when present, additionally
+gets a named runtime in `daemon.json`, which is what makes the one-liner below
+work.
+
+## Use it
+
+```bash
+docker run --runtime=nvkvm-kata --gpus all --rm \
+    nvidia/cuda:13.3.1-cudnn-devel-ubuntu26.04 nvidia-smi
+```
+
+That is the whole user-facing surface. **No `volumes:`, no `LD_LIBRARY_PATH`, no
+`VISIBLE_CDI_DEVICES`.** The host driver's userspace arrives on its own,
+`libcuda.so.1` resolves on its own, and `ldconfig` has already run inside the
+container before your process starts. `--gpus 1`, `--gpus '"device=0"'` and
+`--gpus '"device=GPU-<uuid>"'` select devices exactly as they do under
+`nvidia-container-toolkit`.
+
+Compose says the same thing:
 
 ```yaml
 services:
   cuda:
-    image: ubuntu:24.04
-    runtime: nvkvm-kata
-    environment:
-      VISIBLE_CDI_DEVICES: nvidia.com/gpu=0
-      LD_LIBRARY_PATH: /usr/local/nvidia/lib
-    volumes:
-      - /opt/nvkvm-kata/nvidia/lib:/usr/local/nvidia/lib:ro
+    image: nvidia/cuda:13.3.1-cudnn-devel-ubuntu26.04
+    runtime: nvkvm-kata          # <- the only nvkvm-specific line
+    command: nvidia-smi
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 ```
 
-The script ends by **running the CUDA proof** on the runtime it just registered
-and fails loudly if it does not compute the right answer; installed-but-broken
-is not reported as success. `scripts/nvkvm-kata-uninstall.sh` puts the host
-back, from a manifest written during the install.
+Without Docker, the same thing through containerd:
 
-Selection is a **second Kata `configuration.toml` plus a `ConfigPath` runtime
-option** — a separate containerd runtime type `io.containerd.nvkvm-kata.v2`
-registered in Docker's `daemon.json`, with the stock Kata configuration, the
-stock shim and `runc` untouched. Note that `KATA_CONF_FILE`, the mechanism
-kata-deploy uses and the one you will reach for first, **no longer works** for a
-second configuration on Kata 4.1.0 — see
+```bash
+ctr run --rm --runtime io.containerd.nvkvm-kata.v2 \
+    --runtime-config-path /etc/kata-containers/configuration-nvkvm.toml \
+    --env NVIDIA_VISIBLE_DEVICES=all \
+    docker.io/library/ubuntu:24.04 gpu0 nvidia-smi
+```
+
+How that works — and the measurement it turns on, that kata-agent executes CDI
+hooks arriving from *inside* the guest — is
+[09](docs/design/09-gpu-libraries-automatically.md).
+
+### Where it has actually been installed
+
+Every row below is a fresh rented host, installed from nothing and finishing
+with a CUDA vector-add that checks its own arithmetic.
+
+| host | driver | toolkit | engine | result |
+|---|---|---|---|---|
+| Ubuntu 22.04, RTX 4070 Ti SUPER | 580.173.02 (open) | 1.20.0 | Docker 29.0.3 + containerd 2.1.5 | **PASS** |
+| Ubuntu 22.04, same host, Docker ignored | 580.173.02 | 1.20.0 | `ctr` only | **PASS** |
+| RHEL 9.5 (SELinux enforcing), RTX 3090 | 560.35.03 | 1.17.1 | Docker 27.3.1 + containerd 1.7.23 | **PASS** |
+| Arch Linux | 580.173.02 | 1.20.0 | — | **partial**: builds and dependencies only, see below |
+
+**Arch is only partly tested, and the reason is not a defect.** vast.ai
+publishes no Arch KVM image, so there was no Arch *host* with a GPU and
+`/dev/kvm` to install on. What was run, in an Arch container on a GPU host:
+distro detection, the whole `pacman` dependency path, the Kata install, the
+nvkvm QEMU build and the guest kernel + `nvkvm-guest.ko` build — all pass. The
+guest-rootfs, runtime-registration and verify stages were **not** run on Arch;
+they are the distro-neutral stages, but that is an argument, not a measurement.
+Details in [install §0](docs/install.md#0-preflight).
+
+**Not tested at all:** multi-GPU selection, Kubernetes/CRI, cgroup v1, and any
+non-x86-64 host.
+
+### How the runtime is selected, and how to undo it
+
+A **second Kata `configuration.toml` plus a `ConfigPath` runtime option** — a
+separate containerd runtime type `io.containerd.nvkvm-kata.v2`, and (if Docker
+is present) a named runtime in `daemon.json`. The stock Kata configuration, the
+stock shim and `runc` are untouched and keep working; a container that does not
+name `nvkvm-kata` cannot reach any of this. Note that `KATA_CONF_FILE` — the
+mechanism kata-deploy uses and the one you will reach for first — **no longer
+works** for a second configuration on Kata 4.1.0; see
 [install §5d](docs/install.md#5d-the-containerd-shim-wrapper--half-one-of-the-selection-mechanism).
 
 **The manual path stays first-class.** [`docs/install.md`](docs/install.md) is
-the recipe by hand, in nine numbered sections; the script's nine stages *are*
-those sections and name them in their own output. If the two ever disagree, the
-document is right. Raw output from the run that proved it:
-[`docs/design/evidence/08/`](docs/design/evidence/08/).
+the recipe by hand, in nine numbered sections; the script's stages *are* those
+sections and name them in their own output. If the two ever disagree, the
+document is right.
+
+## Limits worth knowing
+
+Named here rather than discovered later. None of them are new to this release;
+all are measured.
+
+1. **`--gpus` is not an access boundary on cgroup v2.** A container that asks
+   for no GPU can still use one. See finding 1 below.
+2. **`NVIDIA_DRIVER_CAPABILITIES` does not filter the library set.** Device
+   selection transfers; capabilities do not — because NVIDIA's own CDI mode is
+   capability-complete and exposes no capability input
+   ([09 §7](docs/design/09-gpu-libraries-automatically.md#7-capabilities-the-one-thing-that-does-not-transfer)).
+3. **The VMM is not confined.** Kata's QEMU driver gets no seccomp and no
+   jail, and nvkvm is QEMU-only —
+   [01 §3](docs/design/01-vmm-confinement.md), [06](docs/design/06-vmm-confinement-design.md).
 
 **The two findings, because they are the important part:**
 
@@ -134,7 +220,7 @@ part. **That was wrong, and the inversion is the main result.**
 |---|---|
 | VMM opening the **host** GPU device nodes | **MEASURED, and it works today by accident.** Kata builds the sandbox device cgroup itself as an allowlist that excludes `/dev/nvidia*` — and then, on cgroup v2, never installs it, so the VMM opens every NVIDIA node read-write with no configuration. Confirmed on a real RTX 3060. Treat as temporary — [01](docs/design/01-vmm-confinement.md) |
 | confinement of the **VMM process itself** | **MEASURED, and it is the weak point.** Kata jails Firecracker and enables Cloud Hypervisor's seccomp by default; its QEMU driver gets neither, and ships with `seccompsandbox = ""`. Since nvkvm is QEMU-only, this project is pinned to the least-confined VMM — [01 §3](docs/design/01-vmm-confinement.md), [05 §2a](docs/design/05-caveats-and-scope.md) |
-| host NVIDIA **libraries** into the container | works via CDI mounts → virtio-fs; CDI **hooks** are dropped by Kata's shim — [02](docs/design/02-libraries-via-cdi.md) |
+| host NVIDIA **libraries** into the container | **DONE AND AUTOMATIC.** `docker run --gpus all` is the whole user surface. Host-injected CDI **hooks** are dropped by Kata (`kata_agent.go:1055`) — but hooks on a **guest-resident** CDI spec are executed by rustjail, which was the pivotal unknown and is now measured — [09](docs/design/09-gpu-libraries-automatically.md), [02](docs/design/02-libraries-via-cdi.md) |
 | **guest-resident device nodes** into the container | expected to be novel; **it is not.** kata-agent already applies CDI specs found inside the guest — [03](docs/design/03-guest-side-devices.md) |
 | shipping an out-of-tree module in Kata's guest kernel | **DONE AND RUN.** `-g nvkvm`, module built out-of-tree, `depmod`'d, loaded via `kernel_modules` — [04](docs/design/04-guest-kernel.md), [07](docs/design/07-end-to-end.md) |
 | the whole thing, end to end | **DONE AND RUN.** `nvidia-smi` and a CUDA vector-add in a container in a Kata VM; two sandboxes sharing one GPU — [07](docs/design/07-end-to-end.md) |
@@ -177,6 +263,7 @@ construction — removing nvkvm's usual version-matching machinery entirely.
 | [05 — Caveats and scope](docs/design/05-caveats-and-scope.md) | boot time, QEMU-only, and the multi-tenancy problem |
 | [06 — Confining the QEMU VMM](docs/design/06-vmm-confinement-design.md) | the options for confining the VMM, the capability analysis, and a staged recommendation |
 | [07 — End to end](docs/design/07-end-to-end.md) | **the run.** What worked, how to reproduce it, and the two findings that contradict 03 |
+| [09 — `--gpus all`, and nothing else](docs/design/09-gpu-libraries-automatically.md) | how the driver libraries get in with no help from the user; **kata-agent does run guest-side CDI hooks**; what `--gpus` transfers and what it cannot |
 | [Installing](docs/install.md) | **the installer, and the manual path it is a convenience over.** Nine numbered steps, the per-container selection mechanism, uninstall, and what it does *not* do |
 
 ## Evidence standard

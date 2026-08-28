@@ -1,0 +1,61 @@
+### 1. --gpus all
+By pulling and using the container, you accept the terms and conditions of this license:
+GPU 0: NVIDIA GeForce RTX 4070 Ti SUPER (UUID: GPU-f758d3b3-9b42-b723-f657-d14b61eba586)
+### 2. --gpus 1
+By pulling and using the container, you accept the terms and conditions of this license:
+GPU 0: NVIDIA GeForce RTX 4070 Ti SUPER (UUID: GPU-f758d3b3-9b42-b723-f657-d14b61eba586)
+### 3. --gpus "device=0"
+By pulling and using the container, you accept the terms and conditions of this license:
+GPU 0: NVIDIA GeForce RTX 4070 Ti SUPER (UUID: GPU-f758d3b3-9b42-b723-f657-d14b61eba586)
+### 4. --gpus "device=GPU-<uuid>"
+By pulling and using the container, you accept the terms and conditions of this license:
+GPU 0: NVIDIA GeForce RTX 4070 Ti SUPER (UUID: GPU-f758d3b3-9b42-b723-f657-d14b61eba586)
+### 5. --gpus all,capabilities=compute,utility
+invalid argument "all,capabilities=compute,utility" for "--gpus" flag: invalid count (utility): value must be either "all" or an integer: invalid syntax
+Usage:  docker run [OPTIONS] IMAGE [COMMAND] [ARG...]
+Run 'docker run --help' for more information
+### 6. NEGATIVE CONTROL: same runtime, no --gpus
+/dev/nvidia-uvm
+/dev/nvidia-uvm-tools
+/usr/lib/x86_64-linux-gnu/libcuda.so.1
+### 7. CONTROL: runc untouched
+runc OK
+### 8. CONTROL: host still owns the card
+GPU 0: NVIDIA GeForce RTX 4070 Ti SUPER (UUID: GPU-f758d3b3-9b42-b723-f657-d14b61eba586)
+/sys/bus/pci/drivers/nvidia/0000:00:07.0
+### 9. compute, driver API + PTX JIT, compiled IN the container
+By pulling and using the container, you accept the terms and conditions of this license:
+devices: 1
+device 0: NVIDIA GeForce RTX 4070 Ti SUPER
+elements: 1048576  mismatches: 0  sample: c[7]=21.0 (want 21.0)
+VECADD OK
+### 10. compute, nvcc, CUDA version matched to the host driver
+By pulling and using the container, you accept the terms and conditions of this license:
+device: NVIDIA GeForce RTX 4070 Ti SUPER  sm_89
+elements: 1048576  mismatches: 0  sample: c[7]=21.0 (want 21.0)
+NVCC VECADD OK
+### 11. sandbox start-to-exit with 76 mounts
+  5.50 s
+  5.76 s
+  6.01 s
+
+### 5a. --gpus "all,\"capabilities=compute,utility\""
+CAPS=compute,utility
+GPU 0: NVIDIA GeForce RTX 4070 Ti SUPER (UUID: GPU-f758d3b3-9b42-b723-f657-d14b61eba586)
+### 5b. --gpus "capabilities=compute,utility"
+CAPS=compute,utility
+GPU 0: NVIDIA GeForce RTX 4070 Ti SUPER (UUID: GPU-f758d3b3-9b42-b723-f657-d14b61eba586)
+### 6a. NEGATIVE CONTROL, non-NVIDIA image, no --gpus
+ls: cannot access '/dev/nvidia*': No such file or directory
+ls: cannot access '/usr/lib/x86_64-linux-gnu/libcuda.so.1': No such file or directory
+### 6b. explicit opt-out on an NVIDIA image
+ls: cannot access '/dev/nvidia*': No such file or directory
+ls: cannot access '/usr/lib/x86_64-linux-gnu/libcuda.so.1': No such file or directory
+### 11a. cost of the 76 mounts: same image, with and without --gpus
+  no-gpu  4.43 s
+  no-gpu  4.42 s
+  no-gpu  4.57 s
+  --gpus  5.03 s
+  --gpus  5.17 s
+  --gpus  5.17 s
+### 12. injector cost on its own
