@@ -478,6 +478,90 @@ than linking it. It passed on the RHEL host where `libcuda.so.1` was
 unreachable. The check now asks the loader the question the workload will ask:
 is `libcuda.so.1` in the container's ldcache.
 
+## 8c. Docker has a SECOND `--gpus` path, and it is now the default one
+
+Everything above §8b describes the *legacy* path: Docker sets
+`NVIDIA_VISIBLE_DEVICES` on the container and adds
+`nvidia-container-runtime-hook` as a `prestart` hook, and our injector reads the
+first and removes the second.
+
+That is no longer how a current host behaves.
+
+`nvidia-container-toolkit` ships `nvidia-cdi-refresh.service` and
+`nvidia-cdi-refresh.path`, and **the package enables both by default**. They
+write `/var/run/cdi/nvidia.yaml` at boot and again on every driver change.
+Docker lists `/etc/cdi` and `/var/run/cdi` as CDI spec directories, finds the
+`nvidia.com/gpu` kind there, and **resolves `--gpus all` itself, inside the
+daemon**, before it has selected a runtime. Confirmed on two independent hosts:
+the reference desktop (Ubuntu 26.04, driver 595.84) and a rented RTX 4070 Ti box
+(Ubuntu 22.04, driver 575.51.03) — on the rented one, `/var/run/cdi/nvidia.yaml`
+appeared purely as a side effect of `apt-get install nvidia-container-toolkit`,
+with nothing else done to the host.
+
+The spec that then reaches our shim is a different animal:
+
+| | legacy path | daemon-CDI path |
+|---|---|---|
+| `NVIDIA_VISIBLE_DEVICES` | `all` | **`void`** — the CDI spec sets it so the legacy hook stands down |
+| hooks | 1 × `nvidia-container-runtime-hook` (`prestart`) | 7 × `nvidia-cdi-hook` (`createContainer`) |
+| `linux.devices` | *empty* | **host** `/dev/nvidia*`, `/dev/dri/*` with host major/minor |
+| mounts | *none* | 64 host paths, including `/run/nvidia-persistenced/socket` |
+
+Two of those rows are fatal here.
+
+`void` is in `NO_GPU`, so the injector used to conclude "not a GPU container"
+and do **nothing at all** — the container then ran with host-numbered device
+nodes that address nothing in the guest. And the socket cannot cross virtio-fs
+([§8](#8-two-traps-recorded-because-each-cost-real-time)), so `kata-agent`
+aborts `createContainer` with a bare `Input/output error (os error 5)`.
+Every GPU container on the runtime failed to start.
+
+### Why this is repaired here rather than avoided
+
+Three alternatives, all rejected:
+
+* **Tell Docker not to pre-resolve.** There is no per-runtime switch. The
+  daemon resolves `--gpus` while building the spec, before it knows which
+  runtime will receive it, so nothing we install can opt out for our containers
+  only.
+* **Disable `nvidia-cdi-refresh`, or remove the spec directory.** Host-global.
+  It breaks every other CDI consumer on the box (runc with
+  `--device nvidia.com/gpu`, podman, containerd's own CDI support), and it does
+  not stay done — the `.path` unit rewrites the spec on the next driver update.
+  The installer's standing rule is that it must not perturb stock runtimes.
+* **Detect and refuse with a clear message.** Honest, but it would refuse on the
+  *default* configuration of a current Ubuntu + NVIDIA host.
+
+So the injector recognises the daemon's host-side edits and undoes them, which
+is exactly what it already does to the legacy prestart hook. It then takes the
+path that is already proven: hand `kata-agent` the **guest's** CDI spec through
+`VISIBLE_CDI_DEVICES`. There is one way a GPU container gets set up here, not
+two.
+
+### The rule that replaced the symptom
+
+The socket was first fixed in `discover` by kind rather than by name
+([§8](#8-two-traps-recorded-because-each-cost-real-time)). The same rule now
+also runs over the final spec, whoever populated it:
+
+> Only regular files and directories cross virtio-fs. Sockets, FIFOs and device
+> nodes do not, and are dropped with a log line naming the path and its kind.
+
+`/run/nvidia-persistenced/socket` is one instance;
+`/var/run/nvidia-fabricmanager/socket` (NVSwitch hosts) and `/tmp/nvidia-mps`
+(MPS control) are the same class, and are handled by the same three lines
+without being named anywhere.
+
+Detection deliberately rests on **two** independent signatures — an
+`nvidia-cdi-hook` hook, **or** host `/dev/nvidia*` nodes in `linux.devices`,
+which this injector never adds and the legacy path never adds either. Matching
+only the hook name would fail silently the day NVIDIA renames that binary, and
+"fails silently" here means the whole bug comes back. `/dev/dri` alone does not
+count: that is a video container, possibly not NVIDIA's at all.
+
+All of this is pinned by `scripts/lib/gpu-cdi.py self-test`, including the case
+where daemon CDI is **absent**, so the hosts that already worked keep working.
+
 ## 9. The test hosts
 
 Same shape as [07 §9](07-end-to-end.md#9-the-test-host), different rental.

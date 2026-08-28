@@ -70,6 +70,7 @@ import os
 import re
 import stat
 import struct
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -205,20 +206,52 @@ def read_soname(path):
 
 
 # ── discover ─────────────────────────────────────────────────────────────────
-def driver_version():
-    """The host driver version, from /proc, for both kernel-module flavours.
+DRIVER_VERSION_FIELD = re.compile(r"^\d+[.]\d+(?:[.]\d+)?$")
 
-    Take the first dotted number, NOT the token after "Kernel Module": the open
-    module writes "... Open Kernel Module for x86_64  580.95.05 ..." and the
-    proprietary one writes "... x86_64 Kernel Module  575.51.03 ...", so
-    anchoring on the words yields "for" on an open-module host.  This must stay
-    byte-identical to the installer's rule -- `inject` compares its result
-    against the manifest on every container start.
+
+def driver_version_from_text(text):
+    """Parse /proc/driver/nvidia/version's contents.  None if unrecognised.
+
+    THE NVRM LINE ONLY, and a WHOLE-FIELD match of two or three components.
+    The reasoning, the three real formats and the two traps are documented once,
+    next to the shell implementation of the same rule, in
+    scripts/lib/driver-version.sh.  `gpu-cdi.py self-test` asserts that these
+    two implementations agree on every one of those formats -- they have to,
+    because the installer records this value in the manifest and inject()
+    re-derives it on every container start and refuses to run when they differ.
+
+    The short version of why it is not a file-wide regex for a dotted number:
+    the second line of that file is the compiler, it is always three-component,
+    and a driver version may be only two ("595.84").  A file-wide search
+    therefore does not fail loudly on such a host -- it silently returns GCC's
+    version.
     """
+    for line in text.splitlines():
+        if "NVRM version" not in line:
+            continue
+        for field in line.split():
+            if DRIVER_VERSION_FIELD.match(field):
+                return field
+        break
+    return None
+
+
+def driver_version():
+    """The host driver version, from /proc, for both kernel-module flavours."""
     try:
         with open("/proc/driver/nvidia/version") as f:
-            m = re.search(r"\d+\.\d+(?:\.\d+)+", f.read())
-            return m.group(0) if m else None
+            v = driver_version_from_text(f.read())
+        if v:
+            return v
+    except OSError:
+        pass
+    # Last resort, and it must mirror lib/driver-version.sh's fallback exactly:
+    # a format /proc parsing does not recognise is better answered by NVIDIA
+    # than guessed at, but only if BOTH implementations ask the same question.
+    try:
+        pr = subprocess.run(["nvidia-smi", "--query-gpu=driver_version",
+                             "--format=csv,noheader"], capture_output=True, text=True)
+        return ((pr.stdout or "").splitlines() or [""])[0].strip() or None
     except OSError:
         return None
 
@@ -368,6 +401,44 @@ def hook_args(spec, hook_name):
     return out
 
 
+# ── what can and cannot cross virtio-fs ──────────────────────────────────────
+#
+# ONLY REGULAR FILES AND DIRECTORIES CROSS THE VM BOUNDARY.
+#
+# Kata shares an OCI mount by bind-mounting it into the sandbox's shared
+# directory and exporting that over virtio-fs.  A socket, a FIFO or a device
+# node cannot be carried that way, and the failure is not a warning -- the agent
+# aborts createContainer with a bare
+#     Input/output error (os error 5)
+# and a stack of <unknown> frames that names nothing at all.
+#
+# This is a rule about the KIND of file, not about any particular path, and it
+# is deliberately written that way rather than as a blocklist.  The instances
+# seen so far all come from NVIDIA's own discoverers and all move around between
+# toolkit versions:
+#     /run/nvidia-persistenced/socket        (toolkit 1.18.0 and later)
+#     /var/run/nvidia-fabricmanager/socket   (NVSwitch hosts)
+#     /tmp/nvidia-mps                        (MPS control directory's sockets)
+# Naming them one at a time guarantees being wrong on the next host; classifying
+# by st_mode is right on all of them, including the ones not invented yet.
+# MEASURED 2026-08-28: toolkit 1.18.0 emitted the persistenced socket and every
+# GPU container on the runtime failed to start; toolkit 1.17.1 on another host
+# did not emit it, which is exactly why this is filtered by kind and not by name.
+def untraversable_kind(path):
+    """Why `path` cannot cross virtio-fs into the guest, or None if it can."""
+    try:
+        st = os.stat(path)      # follow symlinks: the target is what gets bound
+    except OSError as e:
+        return "unstattable (%s)" % (e.strerror or e)
+    if stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode):
+        return None
+    return ("socket" if stat.S_ISSOCK(st.st_mode) else
+            "fifo" if stat.S_ISFIFO(st.st_mode) else
+            "character device" if stat.S_ISCHR(st.st_mode) else
+            "block device" if stat.S_ISBLK(st.st_mode) else
+            "not a regular file or directory")
+
+
 def discover(out_path, force):
     ver = driver_version()
     if ver is None:
@@ -400,32 +471,10 @@ def discover(out_path, force):
             skipped.append({"source": src, "destination": dst, "why": why,
                             "reason": "host path does not exist"})
             return
-        # ONLY REGULAR FILES AND DIRECTORIES CROSS THE VM BOUNDARY.
-        #
-        # Kata shares an OCI mount by bind-mounting it into the sandbox's
-        # shared directory and exporting that over virtio-fs.  A socket, a
-        # FIFO or a device node cannot be carried that way, and the failure is
-        # not a warning -- the agent aborts createContainer with a bare
-        #     Input/output error (os error 5)
-        # and a stack of <unknown> frames that names nothing.
-        #
-        # This is not hypothetical: nvidia-container-toolkit 1.18.0's IPC
-        # discoverer emits /run/nvidia-persistenced/socket, which is a UNIX
-        # socket, and it made every GPU container on the runtime fail to start.
-        # MEASURED 2026-08-28 on driver 580.95.05 / toolkit 1.18.0; toolkit
-        # 1.17.1 on another host did not emit it, which is exactly why this is
-        # filtered by KIND rather than by name.
-        try:
-            st = os.stat(src)          # follow symlinks: the target is what gets bound
-        except OSError as e:
-            skipped.append({"source": src, "destination": dst, "why": why,
-                            "reason": "stat failed: %s" % e})
-            return
-        if not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
-            kind = ("socket" if stat.S_ISSOCK(st.st_mode) else
-                    "fifo" if stat.S_ISFIFO(st.st_mode) else
-                    "char device" if stat.S_ISCHR(st.st_mode) else
-                    "block device" if stat.S_ISBLK(st.st_mode) else "not a regular file")
+        # Only regular files and directories cross the VM boundary; the rule
+        # and its evidence live on untraversable_kind() above.
+        kind = untraversable_kind(src)
+        if kind:
             warn("skipping %s: %s is a %s and cannot cross virtio-fs" % (dst, src, kind))
             skipped.append({"source": src, "destination": dst, "why": why,
                             "reason": "%s -- cannot cross virtio-fs" % kind})
@@ -594,6 +643,176 @@ def visible_to_cdi(value, uuid_to_index):
     return CDI_KIND + "=" + ",".join(out)
 
 
+# ── Docker's OTHER --gpus path: CDI resolved inside the daemon ────────────
+#
+# MEASURED on the reference desktop, 2026-08-28: Ubuntu 26.04, driver 595.84,
+# nvidia-container-toolkit 1.20.0, Docker 29.7.2.
+#
+# NVIDIA's packaging on a current host ships `nvidia-cdi-refresh.service` and
+# `.path`, both ENABLED BY DEFAULT, which write /var/run/cdi/nvidia.yaml at boot
+# and again on every driver change.  Docker lists /etc/cdi and /var/run/cdi as
+# CDI spec directories, discovers the `nvidia.com/gpu` kind there, and resolves
+# `docker run --gpus all` ITSELF -- in the daemon, before any runtime is
+# selected and long before our shim wrapper runs.  The spec that reaches us then
+# looks nothing like the legacy one:
+#
+#     NVIDIA_VISIBLE_DEVICES=void   <- the CDI spec sets this deliberately, so
+#                                      the legacy hook stands down.  "void" is
+#                                      in NO_GPU, so the injector used to
+#                                      conclude "not a GPU container" and do
+#                                      nothing whatsoever.
+#     hooks.createContainer = 7x /usr/bin/nvidia-cdi-hook
+#     linux.devices         = /dev/nvidia0, /dev/nvidiactl, /dev/dri/card1, ...
+#                             with HOST major/minor -- the exact thing doc 07
+#                             sec 5 says must never cross into the guest.
+#     mounts                = 64 host paths, one of which is
+#                             /run/nvidia-persistenced/socket, a UNIX socket,
+#                             which is what makes kata-agent fail
+#                             createContainer with "Input/output error
+#                             (os error 5)" and kill every GPU container.
+#
+# WHY THIS IS FIXED HERE AND NOT AVOIDED UPSTREAM.  Three alternatives were
+# considered and rejected:
+#
+#   * "tell Docker not to pre-resolve".  There is no per-runtime switch for
+#     this.  The daemon resolves --gpus while building the spec, before it knows
+#     or cares which runtime will receive it, so nothing nvkvm-kata installs can
+#     opt out of it for its own containers only.
+#   * "disable nvidia-cdi-refresh / remove the spec dir".  Host-global, breaks
+#     every OTHER consumer of CDI on the box (runc with --device nvidia.com/gpu,
+#     podman, containerd's own CDI support), and it does not stay done: the
+#     .path unit rewrites the spec on the next driver update.  This installer's
+#     standing rule is that it must not perturb stock runtimes, which is the
+#     same reason it does not touch containerd.service.
+#   * "detect and refuse with a clear message".  Honest, but it would refuse on
+#     the DEFAULT configuration of a current Ubuntu + NVIDIA host, which is most
+#     of them.
+#
+# So the response is the one already applied to Docker's legacy prestart hook:
+# recognise the host-side edits, undo them, and do the guest-side thing instead.
+# The result converges on exactly the code path that is already proven -- ask
+# kata-agent for the GUEST's CDI spec via VISIBLE_CDI_DEVICES -- rather than
+# adding a second way to set a container up.  Only nvkvm-kata containers ever
+# reach this code, so runc and stock Kata cannot be affected by any of it.
+CDI_HOOK_NAMES = ("nvidia-cdi-hook", "nvidia-container-runtime-hook",
+                  "nvidia-container-toolkit")
+HOST_GPU_DEV_PREFIXES = ("/dev/nvidia", "/dev/dri/")
+
+
+def detect_daemon_cdi(cfg):
+    """Did the DAEMON already resolve --gpus through CDI?
+
+    Returns the requested GPU indices as a list of strings -- ["all"] when the
+    spec names no indexed device -- or None if this is not a daemon-CDI spec.
+
+    TWO independent signatures, OR-ed, because either alone has a blind spot:
+
+      * a hook whose binary is `nvidia-cdi-hook`.  That is what the CDI spec
+        written by nvidia-cdi-refresh injects.  The LEGACY path uses a
+        `prestart` hook running a DIFFERENT binary
+        (nvidia-container-runtime-hook), so this does not false-positive on it.
+
+      * HOST /dev/nvidia* or /dev/dri/* nodes in linux.devices.  This injector
+        never adds host device nodes -- their majors are wrong in the guest
+        (doc 07 sec 5) -- and neither does Docker's legacy path, which leaves
+        that job to its prestart hook.  Their presence therefore means
+        something upstream of us has already resolved the GPU request.
+
+    Matching on the hook name ALONE would be a silent failure the day NVIDIA
+    renames that binary, or ships a spec carrying devices but no hooks:
+    detection returns None, NVIDIA_VISIBLE_DEVICES is "void", inject() concludes
+    "not a GPU container" and returns 0 -- and the container starts with host
+    device nodes and a socket bind mount, which is precisely the failure this
+    function exists to prevent.  The device-node signature does not depend on
+    anybody's naming, so the two together degrade gracefully.
+    """
+    hooks = cfg.get("hooks") or {}
+    saw_hook = any(
+        os.path.basename((h.get("path") or "")) == "nvidia-cdi-hook"
+        for phase in ("prestart", "createRuntime", "createContainer", "startContainer")
+        for h in (hooks.get(phase) or []))
+
+    # DETECTION looks at /dev/nvidia* only, deliberately narrower than the set
+    # that gets STRIPPED below.  A container asking for /dev/dri alone is a
+    # video workload, possibly not NVIDIA's at all, and must not be mistaken for
+    # a GPU request; but once we know this IS a daemon-CDI spec, its /dev/dri
+    # nodes are host-numbered like the rest and go with them.
+    idx, saw_dev = [], False
+    for d in (cfg.get("linux") or {}).get("devices") or []:
+        path = d.get("path") or ""
+        if not path.startswith("/dev/nvidia"):
+            continue
+        saw_dev = True
+        base = os.path.basename(path)
+        if base.startswith("nvidia") and base[6:].isdigit():
+            idx.append(base[6:])
+    if not (saw_hook or saw_dev):
+        return None
+    return sorted(set(idx), key=int) or ["all"]
+
+
+def strip_host_gpu_devices(cfg):
+    """Remove host GPU device nodes and their cgroup rules.  Returns the paths.
+
+    The guest's /dev/nvidia-uvm has a different major from the host's, and the
+    guest-side CDI spec (doc 03) is what creates the right ones.  Leaving these
+    in makes Kata attach host-numbered nodes that address nothing.
+
+    The matching device-cgroup allow rules go with them, so the two stay
+    consistent.  (On cgroup v2 kata-agent discards the allowlist anyway -- doc
+    07 sec 8.1 -- so that part is tidiness rather than enforcement.)
+
+    The daemon's LIBRARY mounts are deliberately left alone: they are the same
+    host driver files this injector would add, they are regular files, and
+    inject() dedups by destination.
+    """
+    linux = cfg.setdefault("linux", {})
+    keep, drop = [], []
+    for d in linux.get("devices") or []:
+        path = d.get("path") or ""
+        (drop if path.startswith(HOST_GPU_DEV_PREFIXES) else keep).append(d)
+    linux["devices"] = keep
+
+    gone = {(d.get("type"), d.get("major"), d.get("minor")) for d in drop}
+    res = linux.get("resources") or {}
+    if res.get("devices"):
+        res["devices"] = [r for r in res["devices"]
+                          if (r.get("type"), r.get("major"), r.get("minor")) not in gone]
+    return [d.get("path") or "" for d in drop]
+
+
+def drop_untraversable_mounts(cfg):
+    """Drop bind mounts whose source cannot cross virtio-fs.
+
+    Returns a list of (source, destination, kind) for the ones removed.
+
+    Applied to EVERY GPU container this injector touches, not only the
+    daemon-CDI ones: the rule is a property of virtio-fs, not a property of who
+    added the mount, and a mount that cannot traverse fails the container
+    whichever code path put it there.
+
+    Only ABSOLUTE-source BIND mounts are candidates.  proc, sysfs, tmpfs,
+    devpts, mqueue and cgroup mounts carry a source that is a type name rather
+    than a host path ("proc", "tmpfs"), and stat-ing those would be meaningless.
+    """
+    keep, dropped = [], []
+    for m in cfg.get("mounts") or []:
+        src = m.get("source") or ""
+        mtype = (m.get("type") or "").lower()
+        opts = [str(o).lower() for o in (m.get("options") or [])]
+        is_bind = mtype in ("bind", "rbind") or "bind" in opts or "rbind" in opts
+        if not (src.startswith("/") and is_bind):
+            keep.append(m)
+            continue
+        kind = untraversable_kind(src)
+        if kind:
+            dropped.append((src, m.get("destination") or "", kind))
+        else:
+            keep.append(m)
+    cfg["mounts"] = keep
+    return dropped
+
+
 def inject(bundle, manifest_path):
     cfg_path = os.path.join(bundle, "config.json")
     if not os.path.exists(cfg_path):
@@ -605,7 +824,11 @@ def inject(bundle, manifest_path):
     process = cfg.setdefault("process", {})
     env = process.setdefault("env", [])
     want = env_get(env, NVIDIA_VISIBLE_DEVICES)
-    if want is None or want.strip() in NO_GPU:
+    # Docker has two --gpus paths and they produce different specs; see
+    # detect_daemon_cdi above.  Check the daemon-CDI one FIRST, because it sets
+    # NVIDIA_VISIBLE_DEVICES=void, which the legacy test below reads as "no GPU".
+    daemon_cdi = detect_daemon_cdi(cfg)
+    if daemon_cdi is None and (want is None or want.strip() in NO_GPU):
         return 0                      # not a GPU container; leave it alone
 
     if not os.path.exists(manifest_path):
@@ -627,6 +850,18 @@ def inject(bundle, manifest_path):
     # device nodes and their cgroup rules come from (doc 03).  Host device
     # nodes are deliberately never injected -- the guest's /dev/nvidia-uvm has a
     # different major (doc 07 sec 5).
+    tag = os.path.basename(bundle.rstrip("/"))
+    stripped = ""
+    if daemon_cdi is not None:
+        all_idx = set((man.get("gpu_uuid_to_index") or {}).values())
+        want = ("all" if (daemon_cdi == ["all"] or (all_idx and set(daemon_cdi) == all_idx))
+                else ",".join(daemon_cdi))
+        for path in strip_host_gpu_devices(cfg):
+            log("%s daemon-CDI: dropped host device node %s -- host major/minor "
+                "does not address anything in the guest; the guest CDI spec "
+                "creates its own (doc 07 sec 5)" % (tag, path))
+        stripped = ", daemon-CDI resolved upstream (devices re-derived in-guest)"
+
     cdi = visible_to_cdi(want.strip(), man.get("gpu_uuid_to_index") or {})
     env[:] = [e for e in env if not e.startswith(VISIBLE_CDI_DEVICES + "=")]
     env.append(VISIBLE_CDI_DEVICES + "=" + cdi)
@@ -654,6 +889,20 @@ def inject(bundle, manifest_path):
                        "source": m["source"], "options": m["options"]})
         added += 1
 
+    # Only regular files and directories cross virtio-fs.  Anything else in the
+    # spec -- whoever put it there -- aborts createContainer with a bare
+    # "Input/output error (os error 5)" that names nothing, so drop it here and
+    # say so, by name and by kind, in the log the shim wrapper writes.
+    untraversable = drop_untraversable_mounts(cfg)
+    for src, dst, kind in untraversable:
+        log("%s dropped mount %s -> %s: source is a %s, and only regular files "
+            "and directories cross virtio-fs into the guest; leaving it would "
+            "fail createContainer with \"Input/output error (os error 5)\""
+            % (tag, src, dst, kind))
+    if untraversable:
+        stripped += ", -%d untraversable mounts (%s)" % (
+            len(untraversable), ", ".join(sorted({k for _, _, k in untraversable})))
+
     # Docker adds nvidia-container-runtime-hook as a `prestart` hook whenever
     # --gpus is used and the toolkit is installed.  Kata DOES run prestart
     # hooks, on the host (katautils/create.go:194) -- where the hook would
@@ -666,8 +915,7 @@ def inject(bundle, manifest_path):
     for phase in ("prestart", "createRuntime", "createContainer", "startContainer"):
         keep = []
         for h in hooks.get(phase) or []:
-            if "nvidia-container-runtime-hook" in (h.get("path") or "") or \
-               "nvidia-container-toolkit" in (h.get("path") or ""):
+            if any(n in (h.get("path") or "") for n in CDI_HOOK_NAMES):
                 dropped += 1
                 continue
             keep.append(h)
@@ -680,12 +928,199 @@ def inject(bundle, manifest_path):
     os.replace(tmp, cfg_path)
 
     caps = env_get(env, NVIDIA_DRIVER_CAPABILITIES)
-    log("%s %s=%s -> %s=%s, +%d mounts, -%d host hooks%s"
-        % (os.path.basename(bundle.rstrip("/")), NVIDIA_VISIBLE_DEVICES, want,
-           VISIBLE_CDI_DEVICES, cdi, added, dropped,
+    log("%s %s=%s -> %s=%s, +%d mounts, -%d host hooks%s%s"
+        % (tag, NVIDIA_VISIBLE_DEVICES, want,
+           VISIBLE_CDI_DEVICES, cdi, added, dropped, stripped,
            (", capabilities=%s (recorded, not filtered: CDI mode is "
             "capability-complete)" % caps) if caps else ""))
     return 0
+
+
+# ── self-test ────────────────────────────────────────────────────────────────
+# Rents nothing, needs no GPU, no Kata and no root.  Same convention as the rest
+# of scripts/: anything exercisable without hardware proves itself.
+#
+# Everything asserted here is a rule that has ALREADY been got wrong once on a
+# real host.  That is the entry criterion for a case being in this list.
+PROC_PROPRIETARY = (
+    "NVRM version: NVIDIA UNIX x86_64 Kernel Module  575.51.03  "
+    "Fri May 30 07:52:57 UTC 2025\n"
+    "GCC version:  gcc version 12.3.0 (Ubuntu 12.3.0-1ubuntu1~22.04)\n")
+PROC_OPEN_THREE = (
+    "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  580.95.05  "
+    "Wed Sep 10 20:44:29 UTC 2025\n"
+    "GCC version:  gcc version 13.3.0 (Ubuntu 13.3.0-6ubuntu2~24.04)\n")
+PROC_OPEN_TWO = (
+    "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  595.84  "
+    "Thu Jul 17 12:00:00 UTC 2026\n"
+    "GCC version:  gcc version 15.2.0 (Ubuntu 15.2.0-16ubuntu1)\n")
+DRIVER_FIXTURES = [
+    ("proprietary, 3-component", PROC_PROPRIETARY, "575.51.03"),
+    ("open module, 3-component", PROC_OPEN_THREE, "580.95.05"),
+    ("open module, 2-component", PROC_OPEN_TWO, "595.84"),
+]
+
+
+def _bash_driver_version(text):
+    """Run the SHELL implementation over the same fixture, for comparison."""
+    sh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "driver-version.sh")
+    if not os.path.exists(sh):
+        return None, "lib/driver-version.sh is missing"
+    with tempfile.NamedTemporaryFile("w", suffix=".version", delete=False) as f:
+        f.write(text)
+        path = f.name
+    try:
+        p = subprocess.run(
+            ["bash", "-c", '. "$1"; nvkvm_driver_version_from_file "$2"', "_", sh, path],
+            capture_output=True, text=True)
+        return p.stdout.strip(), None
+    finally:
+        os.unlink(path)
+
+
+def self_test():
+    fails, checks = [], [0]
+
+    def check(ok, label, detail=""):
+        checks[0] += 1
+        if not ok:
+            fails.append("%s%s" % (label, (" -- " + detail) if detail else ""))
+
+    # 1. the driver-version parser, on all three real formats, BOTH languages.
+    for label, text, expect in DRIVER_FIXTURES:
+        got = driver_version_from_text(text)
+        check(got == expect, "driver_version_from_text(%s)" % label,
+              "expected %r, got %r" % (expect, got))
+        bash_got, err = _bash_driver_version(text)
+        if err:
+            check(False, "bash driver rule (%s)" % label, err)
+        else:
+            check(bash_got == expect, "bash rule (%s)" % label,
+                  "expected %r, got %r" % (expect, bash_got))
+            # The invariant that actually matters: the installer records what
+            # the shell rule returns, and inject() refuses to run when its own
+            # answer differs.  Equality here is what keeps GPU containers
+            # startable at all.
+            check(bash_got == got, "shell and Python rules agree (%s)" % label,
+                  "bash %r vs python %r" % (bash_got, got))
+
+    # 2. the GCC trap, stated as its own case because it is the actual defect:
+    #    a file-wide search for a dotted number returns the COMPILER's version
+    #    on a two-component driver, and does so silently.
+    check(driver_version_from_text(PROC_OPEN_TWO) != "15.2.0",
+          "two-component driver is not confused with the GCC version")
+    check(driver_version_from_text("GCC version:  gcc version 15.2.0 (Ubuntu)\n") is None,
+          "a file with no NVRM line yields nothing rather than the compiler")
+    check(driver_version_from_text("") is None, "empty /proc file yields None")
+
+    # 3. daemon-CDI detection.
+    legacy = {"process": {"env": ["NVIDIA_VISIBLE_DEVICES=all"]},
+              "hooks": {"prestart": [{"path": "/usr/bin/nvidia-container-runtime-hook"}]}}
+    check(detect_daemon_cdi(legacy) is None,
+          "legacy prestart-hook spec is NOT mistaken for daemon CDI")
+    check(detect_daemon_cdi({"process": {"env": []}}) is None,
+          "a plain non-GPU spec is not daemon CDI")
+    daemon = {"process": {"env": ["NVIDIA_VISIBLE_DEVICES=void"]},
+              "hooks": {"createContainer": [{"path": "/usr/bin/nvidia-cdi-hook"}]},
+              "linux": {"devices": [{"path": "/dev/nvidia0", "type": "c", "major": 195, "minor": 0},
+                                    {"path": "/dev/nvidiactl", "type": "c", "major": 195, "minor": 255}]}}
+    check(detect_daemon_cdi(daemon) == ["0"], "daemon-CDI spec yields its GPU index",
+          repr(detect_daemon_cdi(daemon)))
+    # The hardening: devices but no recognisable hook must STILL be detected,
+    # or a renamed hook binary silently reintroduces the whole bug.
+    nohook = {"process": {"env": ["NVIDIA_VISIBLE_DEVICES=void"]},
+              "linux": {"devices": [{"path": "/dev/nvidia0", "type": "c", "major": 195, "minor": 0}]}}
+    check(detect_daemon_cdi(nohook) == ["0"],
+          "host device nodes alone are enough to detect daemon CDI")
+    hookonly = {"hooks": {"createContainer": [{"path": "/usr/bin/nvidia-cdi-hook"}]}}
+    check(detect_daemon_cdi(hookonly) == ["all"],
+          "hook with no indexed device means 'all'")
+    multi = {"linux": {"devices": [{"path": "/dev/nvidia1"}, {"path": "/dev/nvidia0"},
+                                   {"path": "/dev/dri/card1"}]}}
+    check(detect_daemon_cdi(multi) == ["0", "1"], "indices come back sorted numerically",
+          repr(detect_daemon_cdi(multi)))
+    check(detect_daemon_cdi({"linux": {"devices": [{"path": "/dev/dri/card0"}]}}) is None,
+          "/dev/dri alone is a video container, NOT a GPU request")
+    check(detect_daemon_cdi({"linux": {"devices": [{"path": "/dev/fuse"}]}}) is None,
+          "an unrelated device node is not a GPU request")
+
+    # 4. stripping host device nodes takes their cgroup rules with them.
+    spec = {"linux": {"devices": [{"path": "/dev/nvidia0", "type": "c", "major": 195, "minor": 0},
+                                  {"path": "/dev/dri/card1", "type": "c", "major": 226, "minor": 1},
+                                  {"path": "/dev/fuse", "type": "c", "major": 10, "minor": 229}],
+                      "resources": {"devices": [{"allow": True, "type": "c", "major": 195, "minor": 0},
+                                                {"allow": True, "type": "c", "major": 10, "minor": 229}]}}}
+    removed = strip_host_gpu_devices(spec)
+    check(sorted(removed) == ["/dev/dri/card1", "/dev/nvidia0"],
+          "host GPU device nodes are removed", repr(removed))
+    check([d["path"] for d in spec["linux"]["devices"]] == ["/dev/fuse"],
+          "non-GPU device nodes are left alone")
+    check(spec["linux"]["resources"]["devices"] == [{"allow": True, "type": "c",
+                                                     "major": 10, "minor": 229}],
+          "the matching cgroup allow rules go with them")
+
+    # 5. the traversability rule, against real files of each kind.
+    tmp = tempfile.mkdtemp(prefix="nvkvm-selftest-")
+    try:
+        reg = os.path.join(tmp, "lib.so")
+        open(reg, "w").close()
+        sub = os.path.join(tmp, "dir")
+        os.mkdir(sub)
+        fifo = os.path.join(tmp, "fifo")
+        os.mkfifo(fifo)
+        sock = os.path.join(tmp, "socket")
+        import socket as _socket
+        srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        srv.bind(sock)
+        link = os.path.join(tmp, "link-to-socket")
+        os.symlink(sock, link)
+
+        check(untraversable_kind(reg) is None, "a regular file traverses")
+        check(untraversable_kind(sub) is None, "a directory traverses")
+        check(untraversable_kind(fifo) == "fifo", "a fifo is named as a fifo")
+        check(untraversable_kind(sock) == "socket", "a socket is named as a socket")
+        check(untraversable_kind(link) == "socket",
+              "a SYMLINK to a socket is judged by its target, which is what gets bound")
+        check(untraversable_kind("/dev/null") == "character device",
+              "a device node is named as a device node")
+        check(untraversable_kind(os.path.join(tmp, "nope")) is not None,
+              "a missing source is not silently kept")
+
+        cfg = {"mounts": [
+            {"source": reg, "destination": "/usr/lib/lib.so", "type": "bind", "options": ["ro"]},
+            {"source": sub, "destination": "/opt/dir", "type": "bind", "options": ["ro"]},
+            {"source": sock, "destination": "/run/nvidia-persistenced/socket",
+             "type": "bind", "options": ["ro"]},
+            {"source": fifo, "destination": "/tmp/fifo", "type": "bind", "options": ["ro"]},
+            {"source": "tmpfs", "destination": "/dev/shm", "type": "tmpfs",
+             "options": ["nosuid"]},
+            {"source": "proc", "destination": "/proc", "type": "proc", "options": []},
+            {"source": "/dev/null", "destination": "/dev/null", "type": "bind",
+             "options": ["rbind"]},
+        ]}
+        dropped = drop_untraversable_mounts(cfg)
+        dests = [d for _, d, _ in dropped]
+        check(sorted(dests) == ["/dev/null", "/run/nvidia-persistenced/socket", "/tmp/fifo"],
+              "socket, fifo and device-node bind mounts are all dropped", repr(dests))
+        kept = [m["destination"] for m in cfg["mounts"]]
+        check(kept == ["/usr/lib/lib.so", "/opt/dir", "/dev/shm", "/proc"],
+              "regular files, directories and non-bind mounts survive", repr(kept))
+        # The one that would break every container on the box if got wrong:
+        # tmpfs/proc sources are TYPE NAMES, not host paths, and stat-ing them
+        # would drop /proc and /dev/shm from every container.
+        check(not any(d in ("/proc", "/dev/shm") for d in dests),
+              "pseudo-filesystem mounts are never candidates", repr(dests))
+    finally:
+        try:
+            srv.close()
+        except Exception:
+            pass
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print("gpu-cdi self-test: %d checks, %d failed" % (checks[0], len(fails)))
+    for f in fails:
+        print("  FAIL  %s" % f)
+    return 1 if fails else 0
 
 
 def main():
@@ -698,9 +1133,12 @@ def main():
     i = sub.add_parser("inject")
     i.add_argument("--bundle", default=".")
     i.add_argument("--manifest", default=DEFAULT_MANIFEST)
+    sub.add_parser("self-test", help="prove the parsers and filters; needs no GPU")
     a = ap.parse_args()
     if a.cmd == "discover":
         return discover(a.out, a.force)
+    if a.cmd == "self-test":
+        return self_test()
     return inject(a.bundle, a.manifest)
 
 

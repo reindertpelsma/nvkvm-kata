@@ -6,6 +6,19 @@ Every script that can be exercised without hardware has a `--self-test` that
 rents nothing, needs no GPU and no Kata, and proves the machinery it depends on
 before you trust a result from it.
 
+The GPU injector's is a subcommand rather than a flag, because it has
+subcommands already:
+
+```bash
+scripts/lib/gpu-cdi.py self-test     # 33 checks, no GPU, no root, no Kata
+```
+
+It pins the three things that have actually broken a real install: the
+driver-version rule (all three `/proc/driver/nvidia/version` formats, in BOTH
+the shell and the Python implementation, and that they agree), the detection of
+a `--gpus` request that Docker's daemon already resolved through CDI, and the
+rule that only regular files and directories can cross virtio-fs.
+
 | script | status | design doc |
 |---|---|---|
 | `check-vmm-device-access.sh` | **implemented** — the Q1 experiment | [01](../docs/design/01-vmm-confinement.md) |
@@ -18,6 +31,7 @@ before you trust a result from it.
 | `nvkvm-kata-install.sh` | **implemented and run end to end** — source → installed, one script | [install](../docs/install.md) |
 | `nvkvm-kata-uninstall.sh` | **implemented and run** — reverts from the install manifest | [install](../docs/install.md#uninstall) |
 | `lib/gpu-cdi.py` | **implemented and run end to end** — `discover` asks `nvidia-ctk` which files are driver files; `inject` puts them in the OCI spec per container, from the shim wrapper. This is what removes the manual `volumes:` + `LD_LIBRARY_PATH` | [09](../docs/design/09-gpu-libraries-automatically.md) |
+| `lib/driver-version.sh` | **implemented** — the ONE driver-version rule, sourced by the installer and mirrored by `gpu-cdi.py`; `gpu-cdi.py self-test` asserts the two agree on all three real `/proc/driver/nvidia/version` formats | [install](../docs/install.md) |
 | `lib/kata-conf-edit.py` | derive a second `configuration.toml` without losing its comments | [install §5c](../docs/install.md#5c-the-second-configuration) |
 | `lib/docker-runtime.py` | add/remove one named runtime in `/etc/docker/daemon.json` | [install §6b](../docs/install.md#6b-docker--one-key-in-daemonjson---what-runtime-in-compose-reads) |
 

@@ -262,6 +262,32 @@ bash /root/nvkvm-pv/scripts/build_qemu.sh --install-deps
 **Assert the last line.** A QEMU that builds but has no `virtio-nvgpu` produces
 a VM that boots perfectly and has no GPU, and nothing in the logs says why.
 
+**If `/opt/qemu-nvkvm` already exists, find out what put it there before you
+reuse it.** `build_qemu.sh` skips the build when that path is populated, so an
+nvkvm QEMU left behind by *some other* nvkvm-pv checkout is silently adopted —
+and the guest module in §3 is built from *your* checkout. The device ABI is
+shared between the two halves, so two checkouts that disagree about
+`src/abi/nvgpu.h` give you a VM that boots, loads the module, and misbehaves
+later for reasons that look like driver bugs. On the 2026-08-28 desktop,
+`/opt/qemu-nvkvm` held a 9.2.0 build of a divergent lineage, so that install
+built its own into a separate prefix and left the existing one alone:
+
+```bash
+NVKVM_QEMU_PREFIX=/opt/qemu-nvkvm-kata NVKVM_QEMU_SRC=/root/qemu-src-nvkvm-kata \
+  bash /root/nvkvm-pv/scripts/build_qemu.sh --install-deps
+sudo scripts/nvkvm-kata-install.sh --qemu /opt/qemu-nvkvm-kata/bin/qemu-system-x86_64 ...
+```
+
+`--qemu` is written into `/etc/nvkvm-kata/shim.env` by [§5b](#5b-the-shims-environment),
+so pass it on **every** invocation that runs the `runtime` stage, not only the
+one that builds. It is resolved when the arguments are parsed, so it now takes
+effect whichever stages you select. (It used to be applied inside the `qemu`
+stage, so `--only runtime --qemu …` silently wrote the *default* path into
+`shim.env`. On a host that already had an unrelated `/opt/qemu-nvkvm`, stage 5's
+"is something executable there" check passed and you got a VM that boots on the
+wrong hypervisor and says nothing at all. Fixed, and
+`--only runtime --qemu <path>` is regression-tested.)
+
 ## 3. The guest kernel and `nvkvm-guest.ko`
 
 ```bash
