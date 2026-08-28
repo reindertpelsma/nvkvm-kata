@@ -309,6 +309,25 @@ preflight() {
     [ -r /dev/kvm ] && [ -w /dev/kvm ] || die "/dev/kvm is not read-write for root" "check ownership/permissions on /dev/kvm"
     ok "/dev/kvm present ($(systemd-detect-virt 2>/dev/null || echo 'virt unknown'))"
 
+    # python3 is GLOBAL, not a build dependency.  Three helpers here are Python
+    # -- kata-conf-edit.py (stage 5), docker-runtime.py (stage 6) and
+    # lib/gpu-cdi.py -- and gpu-cdi.py runs from the shim on EVERY container
+    # start, forever.  A host without python3 cannot run a GPU container at all,
+    # whichever stages were used to install.
+    #
+    # It used to be asserted only under `want qemu || kernel || rootfs || libs`,
+    # so `--only runtime` or `--only engine` failed deep inside a stage instead
+    # of here.  That is the same shape as the `--qemu`-ignored-unless-the-qemu-
+    # stage-ran bug fixed earlier: a dependency guarded by the wrong stage.
+    #
+    # tomllib/tomli is NOT checked here on purpose -- that one really is
+    # build-only (QEMU 11's configure parses pyproject.toml), and our own
+    # helpers use nothing outside the standard library.
+    command -v python3 >/dev/null 2>&1 \
+        || die "python3 is required but not installed" \
+               "install the $(pkg_for python3) package for your distro"
+    ok "python3 present ($(python3 --version 2>&1))"
+
     # NVIDIA driver.  Read /proc, not nvidia-smi: nvidia-smi can fail for
     # reasons that have nothing to do with the driver being loaded.
     [ -r /proc/driver/nvidia/version ] || die \
@@ -432,7 +451,7 @@ preflight() {
         # "ERROR: missing build dependencies: xxd".  MEASURED on Arch,
         # 2026-08-28.  Satisfying it here means that never happens.
         _need xxd xxd
-        _need losetup losetup ; _need python3 python3
+        _need losetup losetup
         _need patch patch ; _need file file
         # bc and rsync are needed by the KERNEL build, not by us, and their
         # absence surfaces two minutes in as an unattributable make error.
