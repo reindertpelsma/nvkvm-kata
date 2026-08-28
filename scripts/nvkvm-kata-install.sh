@@ -542,6 +542,10 @@ stage_runtime() {
     install -d "$PREFIX/bin" "$PREFIX/share" "$PREFIX/nvidia/lib" "$PREFIX/nvidia/bin"
     manifest_add created "$PREFIX"
     install -m0755 "$HERE/nvkvm-qemu-shim.sh" "$SHIM_PATH"
+    # The GPU injector.  Runs once per container, from the containerd shim
+    # wrapper below, and is what removes the manual `volumes:` +
+    # LD_LIBRARY_PATH the README used to require.  docs/install.md 7.
+    install -m0755 "$HERE/lib/gpu-cdi.py" "$PREFIX/bin/nvkvm-kata-gpu-cdi"
     install -m0644 "$ARTIFACTS/vmlinuz-$rel" "$PREFIX/share/vmlinuz-$rel"
     install -m0644 "$ARTIFACTS/kata-nvkvm.image" "$PREFIX/share/kata-nvkvm.image"
     ok "installed shim, vmlinuz-$rel and kata-nvkvm.image under $PREFIX"
@@ -645,6 +649,23 @@ EOF
 # without --runtime-config-path, say.  On Kata 4.1.0 it is REJECTED for a
 # non-shipped path, which is intentional here: it turns "silently ran on the
 # stock configuration with no GPU" into a one-line error naming this file.
+#
+# THE GPU INJECTION POINT.  containerd writes the OCI config.json into the
+# bundle BEFORE it exec's this binary with \`start\`, and it exec's us with the
+# bundle as the working directory (MEASURED --
+# docs/design/evidence/09/shim-bundle-probe.log).  That is the last place on
+# the host where the spec can still be edited: Kata's own shim reads
+# config.json from the bundle, and by the time the agent sees the spec its
+# hooks have been deleted (kata_agent.go:1055 constrainGRPCSpec).
+#
+# So a container that asked for a GPU the Docker way -- \`docker run --gpus\`,
+# which sets NVIDIA_VISIBLE_DEVICES -- gets the host driver's libraries as
+# mounts and the one environment variable kata-agent needs, right here.  A
+# container that did not ask is not touched at all.
+last=""; for a in "\$@"; do last="\$a"; done
+if [ "\$last" = "start" ]; then
+    ${PREFIX}/bin/nvkvm-kata-gpu-cdi inject --bundle "\$PWD" || exit 1
+fi
 exec env KATA_CONF_FILE=${NVKVM_CONF} ${KATA_ROOT}/bin/containerd-shim-kata-v2 "\$@"
 EOF
 )"
@@ -771,50 +792,64 @@ EOF
 
 # ═════════════════════════════════════════════════════════════════════════════
 # STAGE 7 -- LIBS.  docs/install.md §7
-# The host driver's own userspace, for containers to bind-mount.  Host-specific
-# by construction (it must match the servicing kernel driver exactly), which is
-# why it is an INSTALL step and not a BUILD step -- a prebuilt tarball can never
-# carry it, and the NVIDIA libraries are not redistributable anyway.
+# The host driver's own userspace, for containers to get automatically.
+# Host-specific by construction (it must match the servicing kernel driver
+# exactly), which is why it is an INSTALL step and not a BUILD step -- a
+# prebuilt tarball can never carry it, and the NVIDIA libraries are not
+# redistributable anyway.
+#
+# THIS STAGE USED TO COPY A HAND-PICKED BUNDLE and leave the user to bind-mount
+# it with a `volumes:` line and an LD_LIBRARY_PATH.  It no longer does either.
+# It asks NVIDIA which files are driver files -- `nvidia-ctk cdi generate`, the
+# same command Kata's own NVIDIA-GPU path runs -- and records the answer as a
+# mount manifest that the shim wrapper applies per container.  A new driver
+# release that ships a new library needs no change here.
 # ═════════════════════════════════════════════════════════════════════════════
 stage_libs() {
-    step "stage 7/8  host driver userspace + the vecadd proof"
-    install -d "$PREFIX/nvidia/lib" "$PREFIX/nvidia/bin"
+    step "stage 7/8  host driver userspace (discovered by nvidia-ctk) + the vecadd proof"
+    install -d "$PREFIX/nvidia/bin"
 
-    local marker="$PREFIX/nvidia/lib/.driver-version"
-    if [ "$FORCE" = 0 ] && [ "$(cat "$marker" 2>/dev/null)" = "$DRIVER_VERSION" ] \
-       && [ -e "$PREFIX/nvidia/lib/libcuda.so.1" ]; then
-        ok "driver bundle already staged for $DRIVER_VERSION"
-    else
-        [ -n "$NVKVM_SRC" ] || resolve_sources
-        [ -x "$NVKVM_SRC/scripts/make_host_bundle.sh" ] || die "no make_host_bundle.sh in $NVKVM_SRC" "pass --nvkvm-src"
-        change "collecting NVIDIA userspace for driver $DRIVER_VERSION"
-        rm -rf "$STATE/hostlibs"; mkdir -p "$STATE/hostlibs"
-        NVKVM_DRIVER_VERSION="$DRIVER_VERSION" bash "$NVKVM_SRC/scripts/make_host_bundle.sh" "$STATE/hostlibs" \
-            || die "make_host_bundle.sh failed" "run it by hand -- docs/install.md §7"
-        local src="$STATE/hostlibs/host-libs-$DRIVER_VERSION"
-        [ -d "$src" ] || die "no $src produced" "make_host_bundle.sh reported success but wrote nothing"
-        rm -rf "$PREFIX/nvidia/lib"; install -d "$PREFIX/nvidia/lib"
-        cp -a "$src"/. "$PREFIX/nvidia/lib/"
-        # SONAME links.  Kata drops CDI's hooks (kata#11169), so NOTHING runs
-        # ldconfig inside the container: libcuda.so.1 has to exist as a name on
-        # disk or every dlopen("libcuda.so.1") fails.
-        local n=0 f so
-        for f in "$PREFIX/nvidia/lib"/*.so.*; do
-            [ -f "$f" ] || continue
-            so="$(objdump -p "$f" 2>/dev/null | awk '/SONAME/{print $2}')"
-            [ -n "$so" ] && [ "$so" != "$(basename "$f")" ] && { ln -sf "$(basename "$f")" "$PREFIX/nvidia/lib/$so"; n=$((n+1)); }
-        done
-        printf '%s' "$DRIVER_VERSION" > "$marker"
-        change "staged $(ls "$PREFIX/nvidia/lib" | wc -l) files, $n SONAME links, driver $DRIVER_VERSION"
+    # `docker run --gpus` needs nvidia-container-toolkit on this host anyway:
+    # Docker only registers its "nvidia" device driver when
+    # nvidia-container-runtime-hook is on PATH, and without it `--gpus all`
+    # fails with "could not select device driver".  So requiring the toolkit
+    # costs nothing that was not already required, and it is also where the
+    # discovery comes from.
+    if ! command -v nvidia-ctk >/dev/null 2>&1; then
+        if [ "$DO_INSTALL_DEPS" = 1 ]; then
+            change "installing nvidia-container-toolkit (nvidia-ctk is the library discoverer)"
+            apt_install_toolkit || die "could not install nvidia-container-toolkit" \
+                "install it by hand -- https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html"
+        else
+            die "nvidia-ctk not found" \
+                "install nvidia-container-toolkit (or re-run with --install-deps).  Docker needs it too: without it, docker run --gpus all fails outright"
+        fi
     fi
-    [ -e "$PREFIX/nvidia/lib/libcuda.so.1" ] \
-        || die "no libcuda.so.1 in $PREFIX/nvidia/lib" "the SONAME link pass failed; without it every dlopen in the container fails"
 
-    # nvidia-smi, if the host has one, so a user can sanity-check by hand.
-    if command -v nvidia-smi >/dev/null 2>&1 && [ ! -x "$PREFIX/nvidia/bin/nvidia-smi" ]; then
-        cp -aL "$(command -v nvidia-smi)" "$PREFIX/nvidia/bin/nvidia-smi"
-        change "staged nvidia-smi"
-    fi
+    local manifest="$STATE/gpu-mounts.json"
+    local args=(discover --out "$manifest")
+    [ "$FORCE" = 1 ] && args+=(--force)
+    python3 "$HERE/lib/gpu-cdi.py" "${args[@]}" \
+        || die "gpu-cdi.py discover failed" "run it by hand -- docs/install.md §7"
+    manifest_add created "$manifest"
+    local nmounts
+    nmounts="$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["mounts"]))' "$manifest" 2>/dev/null || echo 0)"
+    [ "$nmounts" -gt 0 ] || die "$manifest lists no mounts" \
+        "nvidia-ctk found no driver files; check that the NVIDIA driver is loaded"
+    python3 -c 'import json,sys
+m=json.load(open(sys.argv[1]))
+d=[x["destination"] for x in m["mounts"]]
+missing=[n for n in ("/usr/bin/nvidia-smi",) if n not in d]
+soname=[x for x in d if x.endswith("libcuda.so.1")]
+sys.exit(0 if (not missing and soname) else 1)' "$manifest" \
+        || die "$manifest is missing libcuda.so.1 or nvidia-smi" \
+               "the SONAME pass failed; without it every dlopen in the container fails"
+    ok "$nmounts container mounts recorded for driver $DRIVER_VERSION ($manifest)"
+
+    # nvidia-smi is NOT staged here any more.  It is in the manifest above --
+    # nvidia-ctk lists it as a driver file -- so every GPU container gets the
+    # host's own /usr/bin/nvidia-smi automatically, on PATH, with no volume.
+    rm -f "$PREFIX/nvidia/bin/nvidia-smi"
 
     # The proof binary.  Driver API through dlopen with embedded PTX, so it
     # needs no CUDA toolkit anywhere -- neither on this host nor in the image.
@@ -826,6 +861,19 @@ stage_libs() {
     else
         ok "vecadd already built"
     fi
+}
+
+# Install nvidia-container-toolkit from NVIDIA's own apt repository.  Only ever
+# called with --install-deps.
+apt_install_toolkit() {
+    apt-get install -y -qq nvidia-container-toolkit >/dev/null 2>&1 && return 0
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+        | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null || return 1
+    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+        | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+        > /etc/apt/sources.list.d/nvidia-container-toolkit.list || return 1
+    apt-get update -qq >/dev/null 2>&1
+    apt-get install -y -qq nvidia-container-toolkit >/dev/null 2>&1
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -871,6 +919,22 @@ stage_verify() {
             verify_fail "device probe failed: $out"
         fi
 
+        # The libraries arrived on their own, and resolve on their own.  This
+        # is the check that stage 7 actually replaced the manual volume: no
+        # -v, no LD_LIBRARY_PATH, and libcuda.so.1 still resolves.
+        # `ldd | grep "not found"` proves the mounts are complete, not just
+        # present; `|| true` because grep exits 1 on the GOOD outcome (no
+        # unresolved libraries) and that would fail the check backwards.
+        if out="$(run_nvkvm docker "$img" /bin/sh -c 'nvidia-smi -L; echo "unresolved:$(ldd /usr/bin/nvidia-smi | grep -c "not found" || true)"' 2>&1)"; then
+            if printf '%s' "$out" | grep -q 'GPU 0' && printf '%s' "$out" | grep -q 'unresolved:0'; then
+                verify_pass "nvidia-smi works with no volume and no LD_LIBRARY_PATH, 0 unresolved libraries: $(printf '%s' "$out" | grep 'GPU 0')"
+            else
+                verify_fail "nvidia-smi did not enumerate a GPU, or libraries are unresolved: $out"
+            fi
+        else
+            verify_fail "nvidia-smi could not run in the container: $out"
+        fi
+
         # THE PROOF.
         log "running the CUDA vector-add in a container on runtime '$RUNTIME_NAME'..."
         if out="$(run_nvkvm docker "$img" /usr/local/nvidia/bin/vecadd 2>&1)"; then
@@ -908,22 +972,26 @@ stage_verify() {
     fi
 }
 
+# Run a container on the nvkvm-kata runtime, THE WAY A USER WOULD.
+#
+# The only bind mount here is the harness's own proof binary; there is
+# deliberately no driver-library volume and no LD_LIBRARY_PATH, because the
+# whole point of stage 7 is that a user never has to supply either.  If this
+# function ever needs one back, the feature is broken.
+#
+# `ctr` has no --gpus, so the ctr arm sets the variable Docker's --gpus would
+# have set.  Both arms therefore exercise the same code path in the injector.
 run_nvkvm() {   # engine image command...
     local engine="$1" image="$2"; shift 2
     if [ "$engine" = docker ]; then
-        timeout 180 docker run --rm --runtime "$RUNTIME_NAME" \
-            -v "$PREFIX/nvidia/lib:/usr/local/nvidia/lib:ro" \
+        timeout 180 docker run --rm --runtime "$RUNTIME_NAME" --gpus all \
             -v "$PREFIX/nvidia/bin:/usr/local/nvidia/bin:ro" \
-            -e VISIBLE_CDI_DEVICES=nvidia.com/gpu=0 \
-            -e LD_LIBRARY_PATH=/usr/local/nvidia/lib \
             "$image" "$@"
     else
         timeout 180 ctr run --rm --runtime "io.containerd.${RUNTIME_NAME}.v2" \
             --runtime-config-path "$KATA_CONF_DIR/configuration-nvkvm.toml" \
-            --mount "type=bind,src=$PREFIX/nvidia/lib,dst=/usr/local/nvidia/lib,options=rbind:ro" \
             --mount "type=bind,src=$PREFIX/nvidia/bin,dst=/usr/local/nvidia/bin,options=rbind:ro" \
-            --env VISIBLE_CDI_DEVICES=nvidia.com/gpu=0 \
-            --env LD_LIBRARY_PATH=/usr/local/nvidia/lib \
+            --env NVIDIA_VISIBLE_DEVICES=all \
             "$image" "nvkvm-verify-$$" "$@"
     fi
 }
@@ -945,17 +1013,15 @@ main() {
 [nvkvm-kata]
 [nvkvm-kata]   Select it per container.  Nothing global changed:
 [nvkvm-kata]
-[nvkvm-kata]     services:
-[nvkvm-kata]       cuda:
-[nvkvm-kata]         image: ubuntu:24.04
-[nvkvm-kata]         runtime: $RUNTIME_NAME
-[nvkvm-kata]         environment:
-[nvkvm-kata]           VISIBLE_CDI_DEVICES: nvidia.com/gpu=0
-[nvkvm-kata]           LD_LIBRARY_PATH: /usr/local/nvidia/lib
-[nvkvm-kata]         volumes:
-[nvkvm-kata]           - $PREFIX/nvidia/lib:/usr/local/nvidia/lib:ro
+[nvkvm-kata]     docker run --runtime=$RUNTIME_NAME --gpus all --rm \\
+[nvkvm-kata]         nvidia/cuda:13.3.1-cudnn-devel-ubuntu26.04 nvidia-smi
 [nvkvm-kata]
-[nvkvm-kata]   (examples/docker-compose.yml is this, ready to run.)
+[nvkvm-kata]   No volume, no LD_LIBRARY_PATH, no VISIBLE_CDI_DEVICES.  The host driver's
+[nvkvm-kata]   userspace arrives on its own and ldconfig has run inside the container
+[nvkvm-kata]   before your command does.  --gpus 1 / --gpus '"device=0"' /
+[nvkvm-kata]   --gpus '"device=GPU-<uuid>"' select devices the way the toolkit does.
+[nvkvm-kata]
+[nvkvm-kata]   (examples/docker-compose.yml is the compose spelling, ready to run.)
 [nvkvm-kata]   Revert everything:  scripts/nvkvm-kata-uninstall.sh
 EOF
 }

@@ -21,6 +21,22 @@
 # the rootfs it just wrote, then assert the module resolves.
 set -euo pipefail
 
+# losetup -P asks the kernel to scan the partition table, but the p1 device node
+# is created ASYNCHRONOUSLY by udev.  A bare `[ -b "${LOOP}p1" ]` therefore loses
+# a race on a busy host and silently falls back to mounting the WHOLE DISK,
+# which fails with "wrong fs type, bad option, bad superblock" and names
+# nothing useful.  MEASURED on 2026-08-28.  Wait for the node instead.
+wait_for_part() {   # $1 = loop device -> echoes the partition (or the loop) to mount
+    local loop="$1" i
+    command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=5 >/dev/null 2>&1
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        [ -b "${loop}p1" ] && { echo "${loop}p1"; return 0; }
+        sleep 0.5
+    done
+    echo "$loop"   # genuinely unpartitioned image
+}
+
+
 IMAGE="" ; INITRD="" ; MODULES="" ; RELEASE="" ; ONLY="nvkvm-guest" ; BUSYBOX=""
 die() { echo "inject-guest-modules.sh: $*" >&2; exit 1; }
 step() { echo; echo "=== $* ==="; }
@@ -107,7 +123,7 @@ if [ -n "$IMAGE" ]; then
     cp -f "$IMAGE" "$IMAGE.orig" 2>/dev/null || true
     LOOP="$(losetup -f --show -P "$IMAGE")"
     trap 'umount /mnt/nvkvm-rootfs 2>/dev/null || true; losetup -d "$LOOP" 2>/dev/null || true; rm -rf "$STAGE"' EXIT
-    PART="${LOOP}p1" ; [ -b "$PART" ] || PART="$LOOP"
+    PART="$(wait_for_part "$LOOP")"
     mkdir -p /mnt/nvkvm-rootfs
     mount "$PART" /mnt/nvkvm-rootfs
     df -h /mnt/nvkvm-rootfs | tail -1

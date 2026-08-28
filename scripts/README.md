@@ -17,6 +17,7 @@ before you trust a result from it.
 | `e2e/vecadd.c` | **implemented** — the rung-5 proof | [07](../docs/design/07-end-to-end.md) |
 | `nvkvm-kata-install.sh` | **implemented and run end to end** — source → installed, one script | [install](../docs/install.md) |
 | `nvkvm-kata-uninstall.sh` | **implemented and run** — reverts from the install manifest | [install](../docs/install.md#uninstall) |
+| `lib/gpu-cdi.py` | **implemented and run end to end** — `discover` asks `nvidia-ctk` which files are driver files; `inject` puts them in the OCI spec per container, from the shim wrapper. This is what removes the manual `volumes:` + `LD_LIBRARY_PATH` | [09](../docs/design/09-gpu-libraries-automatically.md) |
 | `lib/kata-conf-edit.py` | derive a second `configuration.toml` without losing its comments | [install §5c](../docs/install.md#5c-the-second-configuration) |
 | `lib/docker-runtime.py` | add/remove one named runtime in `/etc/docker/daemon.json` | [install §6b](../docs/install.md#6b-docker--one-key-in-daemonjson---what-runtime-in-compose-reads) |
 

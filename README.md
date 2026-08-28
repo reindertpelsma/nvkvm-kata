@@ -48,20 +48,36 @@ docs claim.
 sudo scripts/nvkvm-kata-install.sh --install-kata --install-deps
 ```
 
-One script, source to installed. Afterwards the choice is **per container** —
-stock Kata and `runc` are untouched and still work:
+One script, source to installed. Afterwards you use it the way you already use a
+GPU container — `--gpus`, and nothing else:
+
+```bash
+docker run --runtime=nvkvm-kata --gpus all --rm \
+    nvidia/cuda:13.3.1-cudnn-devel-ubuntu26.04 nvidia-smi
+```
+
+No `volumes:`, no `LD_LIBRARY_PATH`, no `VISIBLE_CDI_DEVICES`. The host driver's
+own userspace arrives on its own, `libcuda.so.1` resolves on its own, and
+`ldconfig` has run inside the container before your process starts. `--gpus 1`,
+`--gpus '"device=0"'` and `--gpus '"device=GPU-<uuid>"'` select devices the same
+way `nvidia-container-toolkit` does. Same thing in compose — the choice is still
+**per container**, and stock Kata and `runc` are untouched:
 
 ```yaml
 services:
   cuda:
-    image: ubuntu:24.04
-    runtime: nvkvm-kata
-    environment:
-      VISIBLE_CDI_DEVICES: nvidia.com/gpu=0
-      LD_LIBRARY_PATH: /usr/local/nvidia/lib
-    volumes:
-      - /opt/nvkvm-kata/nvidia/lib:/usr/local/nvidia/lib:ro
+    image: nvidia/cuda:13.3.1-cudnn-devel-ubuntu26.04
+    runtime: nvkvm-kata          # <- the whole user-facing surface
+    command: nvidia-smi
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: all, capabilities: [gpu] }]
 ```
+
+*(Earlier revisions of this README told you to bind-mount
+`/opt/nvkvm-kata/nvidia/lib` and set `LD_LIBRARY_PATH` by hand. That is gone —
+[09](docs/design/09-gpu-libraries-automatically.md).)*
 
 The script ends by **running the CUDA proof** on the runtime it just registered
 and fails loudly if it does not compute the right answer; installed-but-broken
@@ -134,7 +150,7 @@ part. **That was wrong, and the inversion is the main result.**
 |---|---|
 | VMM opening the **host** GPU device nodes | **MEASURED, and it works today by accident.** Kata builds the sandbox device cgroup itself as an allowlist that excludes `/dev/nvidia*` — and then, on cgroup v2, never installs it, so the VMM opens every NVIDIA node read-write with no configuration. Confirmed on a real RTX 3060. Treat as temporary — [01](docs/design/01-vmm-confinement.md) |
 | confinement of the **VMM process itself** | **MEASURED, and it is the weak point.** Kata jails Firecracker and enables Cloud Hypervisor's seccomp by default; its QEMU driver gets neither, and ships with `seccompsandbox = ""`. Since nvkvm is QEMU-only, this project is pinned to the least-confined VMM — [01 §3](docs/design/01-vmm-confinement.md), [05 §2a](docs/design/05-caveats-and-scope.md) |
-| host NVIDIA **libraries** into the container | works via CDI mounts → virtio-fs; CDI **hooks** are dropped by Kata's shim — [02](docs/design/02-libraries-via-cdi.md) |
+| host NVIDIA **libraries** into the container | **DONE AND AUTOMATIC.** `docker run --gpus all` is the whole user surface. Host-injected CDI **hooks** are dropped by Kata (`kata_agent.go:1055`) — but hooks on a **guest-resident** CDI spec are executed by rustjail, which was the pivotal unknown and is now measured — [09](docs/design/09-gpu-libraries-automatically.md), [02](docs/design/02-libraries-via-cdi.md) |
 | **guest-resident device nodes** into the container | expected to be novel; **it is not.** kata-agent already applies CDI specs found inside the guest — [03](docs/design/03-guest-side-devices.md) |
 | shipping an out-of-tree module in Kata's guest kernel | **DONE AND RUN.** `-g nvkvm`, module built out-of-tree, `depmod`'d, loaded via `kernel_modules` — [04](docs/design/04-guest-kernel.md), [07](docs/design/07-end-to-end.md) |
 | the whole thing, end to end | **DONE AND RUN.** `nvidia-smi` and a CUDA vector-add in a container in a Kata VM; two sandboxes sharing one GPU — [07](docs/design/07-end-to-end.md) |
@@ -177,6 +193,7 @@ construction — removing nvkvm's usual version-matching machinery entirely.
 | [05 — Caveats and scope](docs/design/05-caveats-and-scope.md) | boot time, QEMU-only, and the multi-tenancy problem |
 | [06 — Confining the QEMU VMM](docs/design/06-vmm-confinement-design.md) | the options for confining the VMM, the capability analysis, and a staged recommendation |
 | [07 — End to end](docs/design/07-end-to-end.md) | **the run.** What worked, how to reproduce it, and the two findings that contradict 03 |
+| [09 — `--gpus all`, and nothing else](docs/design/09-gpu-libraries-automatically.md) | how the driver libraries get in with no help from the user; **kata-agent does run guest-side CDI hooks**; what `--gpus` transfers and what it cannot |
 | [Installing](docs/install.md) | **the installer, and the manual path it is a convenience over.** Nine numbered steps, the per-container selection mechanism, uninstall, and what it does *not* do |
 
 ## Evidence standard

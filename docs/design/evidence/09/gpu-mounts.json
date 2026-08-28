@@ -1,0 +1,879 @@
+{
+  "capabilities": "all (CDI mode is capability-complete)",
+  "cdi_kind": "nvidia.com/gpu",
+  "driver_version": "575.51.03",
+  "generated": "2026-08-28T02:45:49Z",
+  "generator": "nvidia-ctk cdi generate",
+  "gpu_uuid_to_index": {
+    "GPU-f758d3b3-9b42-b723-f657-d14b61eba586": "0"
+  },
+  "ldcache_folders": [
+    "/usr/lib/x86_64-linux-gnu",
+    "/usr/lib/x86_64-linux-gnu/vdpau"
+  ],
+  "mounts": [
+    {
+      "destination": "/usr/bin/nvidia-cuda-mps-control",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/bin/nvidia-cuda-mps-control",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/bin/nvidia-cuda-mps-server",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/bin/nvidia-cuda-mps-server",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/bin/nvidia-debugdump",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/bin/nvidia-debugdump",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/bin/nvidia-persistenced",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/bin/nvidia-persistenced",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/bin/nvidia-smi",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/bin/nvidia-smi",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/etc/vulkan/icd.d/nvidia_icd.json",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/share/vulkan/icd.d/nvidia_icd.json",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/etc/vulkan/implicit_layer.d/nvidia_layers.json",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/share/vulkan/implicit_layer.d/nvidia_layers.json",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libGLESv1_CM_nvidia.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libGLESv1_CM_nvidia.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libGLESv2_nvidia.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libGLESv2_nvidia.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libcuda.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libcuda.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libcudadebugger.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libcudadebugger.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvcuvid.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvcuvid.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-cfg.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-cfg.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-egl-gbm.so.1.1.2",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-egl-gbm.so.1.1.2",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-egl-wayland.so.1.1.19",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-egl-wayland.so.1.1.19",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-eglcore.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-eglcore.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-fbc.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-fbc.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-glcore.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-glsi.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-glsi.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-glvkspirv.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-glvkspirv.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-gpucomp.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-gpucomp.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-ngx.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-ngx.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-opencl.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-opencl.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-opticalflow.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-opticalflow.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-pkcs11-openssl3.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-pkcs11-openssl3.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-present.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-present.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-rtcore.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-rtcore.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-sandboxutils.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-sandboxutils.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-tls.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-tls.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-vksc-core.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-vksc-core.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvoptix.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvoptix.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/share/nvidia/nvoptix.bin",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/share/nvidia/nvoptix.bin",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/lib/firmware/nvidia/575.51.03/gsp_ga10x.bin",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/firmware/nvidia/575.51.03/gsp_ga10x.bin",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/lib/firmware/nvidia/575.51.03/gsp_tu10x.bin",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/firmware/nvidia/575.51.03/gsp_tu10x.bin",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/vdpau/libvdpau_nvidia.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/vdpau/libvdpau_nvidia.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/share/X11/xorg.conf.d/10-nvidia.conf",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/share/X11/xorg.conf.d/10-nvidia.conf",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/share/egl/egl_external_platform.d/10_nvidia_wayland.json",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/share/egl/egl_external_platform.d/10_nvidia_wayland.json",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/share/egl/egl_external_platform.d/15_nvidia_gbm.json",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/share/glvnd/egl_vendor.d/10_nvidia.json",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/share/glvnd/egl_vendor.d/10_nvidia.json",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/nvidia/xorg/libglxserver_nvidia.so.575.51.03",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/nvidia/xorg/libglxserver_nvidia.so.575.51.03",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/nvidia/xorg/nvidia_drv.so",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/nvidia/xorg/nvidia_drv.so",
+      "why": "nvidia-ctk mount"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.575.51.03",
+      "why": "SONAME of libEGL_nvidia.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libGLESv1_CM_nvidia.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libGLESv1_CM_nvidia.so.575.51.03",
+      "why": "SONAME of libGLESv1_CM_nvidia.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libGLESv2_nvidia.so.2",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libGLESv2_nvidia.so.575.51.03",
+      "why": "SONAME of libGLESv2_nvidia.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.0",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.575.51.03",
+      "why": "SONAME of libGLX_nvidia.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libcuda.so.575.51.03",
+      "why": "SONAME of libcuda.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libcudadebugger.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libcudadebugger.so.575.51.03",
+      "why": "SONAME of libcudadebugger.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvcuvid.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvcuvid.so.575.51.03",
+      "why": "SONAME of libnvcuvid.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.575.51.03",
+      "why": "SONAME of libnvidia-allocator.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-cfg.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-cfg.so.575.51.03",
+      "why": "SONAME of libnvidia-cfg.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-egl-gbm.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-egl-gbm.so.1.1.2",
+      "why": "SONAME of libnvidia-egl-gbm.so.1.1.2"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-egl-wayland.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-egl-wayland.so.1.1.19",
+      "why": "SONAME of libnvidia-egl-wayland.so.1.1.19"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.575.51.03",
+      "why": "SONAME of libnvidia-encode.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-fbc.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-fbc.so.575.51.03",
+      "why": "SONAME of libnvidia-fbc.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.575.51.03",
+      "why": "SONAME of libnvidia-ml.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-ngx.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-ngx.so.575.51.03",
+      "why": "SONAME of libnvidia-ngx.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.575.51.03",
+      "why": "SONAME of libnvidia-nvvm.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-opencl.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-opencl.so.575.51.03",
+      "why": "SONAME of libnvidia-opencl.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-opticalflow.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-opticalflow.so.575.51.03",
+      "why": "SONAME of libnvidia-opticalflow.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.575.51.03",
+      "why": "SONAME of libnvidia-ptxjitcompiler.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-sandboxutils.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-sandboxutils.so.575.51.03",
+      "why": "SONAME of libnvidia-sandboxutils.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-vksc-core.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-vksc-core.so.575.51.03",
+      "why": "SONAME of libnvidia-vksc-core.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvoptix.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvoptix.so.575.51.03",
+      "why": "SONAME of libnvoptix.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/vdpau/libvdpau_nvidia.so.1",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "bind"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/vdpau/libvdpau_nvidia.so.575.51.03",
+      "why": "SONAME of libvdpau_nvidia.so.575.51.03"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "rbind",
+        "rprivate"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.575.51.03",
+      "why": "create-symlinks ../libnvidia-allocator.so.1::/usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/nvidia/xorg/libglxserver_nvidia.so",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "rbind",
+        "rprivate"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/nvidia/xorg/libglxserver_nvidia.so.575.51.03",
+      "why": "create-symlinks libglxserver_nvidia.so.575.51.03::/usr/lib/x86_64-linux-gnu/nvidia/xorg/libglxserver_nvidia.so"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libnvidia-opticalflow.so",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "rbind",
+        "rprivate"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libnvidia-opticalflow.so.575.51.03",
+      "why": "create-symlinks libnvidia-opticalflow.so.1::/usr/lib/x86_64-linux-gnu/libnvidia-opticalflow.so"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libGLX_indirect.so.0",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "rbind",
+        "rprivate"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libGLX_nvidia.so.575.51.03",
+      "why": "create-symlinks libGLX_nvidia.so.575.51.03::/usr/lib/x86_64-linux-gnu/libGLX_indirect.so.0"
+    },
+    {
+      "destination": "/usr/lib/x86_64-linux-gnu/libcuda.so",
+      "options": [
+        "ro",
+        "nosuid",
+        "nodev",
+        "rbind",
+        "rprivate"
+      ],
+      "source": "/usr/lib/x86_64-linux-gnu/libcuda.so.575.51.03",
+      "why": "create-symlinks libcuda.so.1::/usr/lib/x86_64-linux-gnu/libcuda.so"
+    }
+  ],
+  "symlinks": [
+    {
+      "link": "/usr/lib/x86_64-linux-gnu/gbm/nvidia-drm_gbm.so",
+      "target": "../libnvidia-allocator.so.1"
+    },
+    {
+      "link": "/usr/lib/x86_64-linux-gnu/nvidia/xorg/libglxserver_nvidia.so",
+      "target": "libglxserver_nvidia.so.575.51.03"
+    },
+    {
+      "link": "/usr/lib/x86_64-linux-gnu/libnvidia-opticalflow.so",
+      "target": "libnvidia-opticalflow.so.1"
+    },
+    {
+      "link": "/usr/lib/x86_64-linux-gnu/libGLX_indirect.so.0",
+      "target": "libGLX_nvidia.so.575.51.03"
+    },
+    {
+      "link": "/usr/lib/x86_64-linux-gnu/libcuda.so",
+      "target": "libcuda.so.1"
+    }
+  ]
+}

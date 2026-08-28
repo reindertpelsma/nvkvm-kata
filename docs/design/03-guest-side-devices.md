@@ -10,6 +10,14 @@ exists.
 
 ---
 
+> **ADDITION, 2026-08-28.** This document's §(a) — "a pod can request a
+> guest-resident GPU by setting one environment variable, with no patch to Kata
+> anywhere" — still stands, and the environment variable is now set *for* the
+> user by the containerd shim wrapper, out of Docker's own `--gpus`. The guest
+> CDI spec also gained an `all` device and one `createContainer` hook, which
+> kata-agent was measured to execute. See
+> [09](09-gpu-libraries-automatically.md).
+
 > **CORRECTION, 2026-08-27 — the central claim of this document was measured
 > and does not hold on the configuration that was run.** This document says the
 > container's device cgroup is "the one that decides, and the one that fails

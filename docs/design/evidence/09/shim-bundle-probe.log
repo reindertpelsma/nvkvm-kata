@@ -1,0 +1,69 @@
+================================================================================
+WHERE THE HOST CAN STILL EDIT THE SPEC, and what Docker's --gpus puts in it.
+containerd 1.7.27, Docker 28.1.1, 2026-08-28.
+================================================================================
+
+--- 1. containerd writes config.json BEFORE it exec's the shim binary ------
+The shim wrapper was replaced with one that logs its argv, its cwd and the
+directory listing, then exec'd the real Kata shim.
+
+=== 2026-08-28T02:32:18 argv: /usr/local/bin/containerd-shim-nvkvm-kata-v2
+      -namespace moby -address /run/containerd/containerd.sock
+      -publish-binary /usr/bin/containerd -id 6aac9919ad07... start
+cwd: /run/containerd/io.containerd.runtime.v2.task/moby/6aac9919ad07...
+total 12
+drwx------ 3 root root   120 Aug 28 02:32 .
+-rw-r--r-- 1 root root 10159 Aug 28 02:32 config.json      <-- present
+prwx------ 1 root root     0 Aug 28 02:32 log
+drwx--x--x 2 root root    40 Aug 28 02:32 rootfs
+CONFIG PRESENT 10159
+
+=== 2026-08-28T02:32:19 argv: ... -bundle ... delete
+CONFIG PRESENT 10159
+
+So `start` runs with the bundle as the working directory and the OCI spec
+already written.  That is the last point on the host at which the spec can be
+edited, and it needs no Kata change to reach.
+
+--- 2. what `docker run --runtime=nvkvm-kata --gpus all` produces ----------
+(from that same config.json)
+
+ENV:
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    HOSTNAME=6aac9919ad07
+    NVIDIA_VISIBLE_DEVICES=all                 <-- the whole request, as data
+HOOKS: {
+ "prestart": [
+  { "path": "/usr/bin/nvidia-container-runtime-hook",
+    "args": ["nvidia-container-runtime-hook", "prestart"], ... } ] }
+MOUNTS: 10
+DEVICES: None
+RESDEV: [{'allow': False, 'access': 'rwm'}, ... no NVIDIA entries ...]
+
+Docker sets the environment variable and adds the toolkit's legacy prestart
+hook.  It injects no mounts, no device nodes and no cgroup rules -- those are
+the hook's job.
+
+--- 3. and that hook does not survive Kata --------------------------------
+$ docker run --runtime=nvkvm-kata --gpus all --rm ubuntu:24.04 /bin/true
+docker: Error response from daemon: failed to create task for container:
+failed to create shim task: exit status 1: stdout: , stderr:
+Auto-detected mode as 'legacy'
+nvidia-container-cli: mount error: mount operation failed:
+/var/lib/docker/overlay2/0786abb7.../merged/proc/driver/nvidia:
+no such file or directory
+docker rc=127
+
+journalctl -t kata:
+  level=error msg="hook error" ... hook-type=pre-start subsystem=hook
+  level=error msg="fail to run prestartHook for sandbox 6aac9919ad07..."
+
+Kata DOES run host prestart hooks (src/runtime/pkg/katautils/create.go:194),
+on the host, where the container rootfs is an overlay directory the guest will
+later see over virtio-fs -- so the hook's bind mounts would not traverse and
+its device nodes would carry host major/minor.  This is the field failure
+reported in kata#10672.
+
+CONSEQUENCE: before this change, `docker run --runtime=nvkvm-kata --gpus all`
+did not merely fail to get a GPU, it FAILED TO START.  The injector removes the
+hook and does the four things it would have done, in the places that work.

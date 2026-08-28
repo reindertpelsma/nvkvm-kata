@@ -1,0 +1,98 @@
+######## THE ACCEPTANCE TEST, verbatim ########
+$ docker run --runtime=nvkvm-kata --gpus all --rm nvidia/cuda:13.3.1-cudnn-devel-ubuntu26.04 "nvidia-smi"
+
+==========
+== CUDA ==
+==========
+
+CUDA Version 13.3.1
+
+Container image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This container image and its contents are governed by the NVIDIA Deep Learning Container License.
+By pulling and using the container, you accept the terms and conditions of this license:
+https://developer.nvidia.com/ngc/nvidia-deep-learning-container-license
+
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+Fri Aug 28 03:00:40 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 575.51.03              Driver Version: 575.51.03      CUDA Version: 12.9     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 4070 ...    Off |   00000000:00:07.0 Off |                  N/A |
+|  0%   31C    P8             17W /  285W |       2MiB /  16376MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+                                                                                         
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A               1  M+C+G   nvidia-smi                                0MiB |
++-----------------------------------------------------------------------------------------+
+
+######## CUDA COMPUTE in that same container ########
+$ docker run --runtime=nvkvm-kata --gpus all --rm -v /tmp/vecadd.c:/tmp/vecadd.c:ro nvidia/cuda:13.3.1-cudnn-devel-ubuntu26.04 bash -c 'gcc -O2 -o /tmp/v /tmp/vecadd.c -ldl && /tmp/v'
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+devices: 1
+device 0: NVIDIA GeForce RTX 4070 Ti SUPER
+elements: 1048576  mismatches: 0  sample: c[7]=21.0 (want 21.0)
+VECADD OK
+
+######## nvcc, CUDA version matched to the host driver (12.9 vs driver 575.51.03) ########
+
+Cuda compilation tools, release 12.9, V12.9.86
+Build cuda_12.9.r12.9/compiler.36037853_0
+device: NVIDIA GeForce RTX 4070 Ti SUPER  sm_89
+elements: 1048576  mismatches: 0  sample: c[7]=21.0 (want 21.0)
+NVCC VECADD OK
+
+######## the resolution the user never had to arrange ########
+A copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.
+
+NVIDIA_CPU_ONLY=unset   (NVIDIA_CPU_ONLY=1 is what the image sets when it cannot find a driver)
+LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64   (nothing of ours in it)
+
+ldconfig -p:
+	libnvidia-ml.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1
+	libcuda.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libcuda.so.1
+
+ldd /usr/bin/nvidia-smi | grep -c "not found":
+0
+
+mount | grep -c nvidia:
+66
+
+/dev:
+crw-rw-rw- 1 root root 243,   0 Aug 28 03:01 /dev/nvidia-uvm
+crw-rw-rw- 1 root root 243,   1 Aug 28 03:01 /dev/nvidia-uvm-tools
+crw-rw-rw- 1 root root 195,   0 Aug 28 03:01 /dev/nvidia0
+crw-rw-rw- 1 root root 195, 255 Aug 28 03:01 /dev/nvidiactl
+
+######## CONTROL: the same image under stock runc + nvidia-container-toolkit ########
+nvidia-container-cli: requirement error: unsatisfied condition: cuda>=13.3, please update your driver to a newer version, or use an earlier cuda container: unknown
+
+Run 'docker run --help' for more information
+
+######## failure mode: asking for a GPU this host does not have ########
+$ docker run --runtime=nvkvm-kata --gpus 2 --rm ubuntu:24.04 /bin/true
+docker: Error response from daemon: failed to create task for container: failed to create shim task: CDI device(s) ["nvidia.com/gpu=1"] do not exist; their CDI kind(s) are present in /var/run/cdi but do not provide them: "unresolvable CDI devices nvidia.com/gpu=1"
+
+Stack backtrace:
+   0: <unknown>
+
+######## negative controls ########
+$ docker run --runtime=nvkvm-kata --rm ubuntu:24.04 ...   (no --gpus)
+ls: cannot access '/dev/nvidia*': No such file or directory
+ls: cannot access '/usr/lib/x86_64-linux-gnu/libcuda.so.1': No such file or directory
+$ docker run --rm ubuntu:24.04 /bin/true   (runc, untouched)
+runc OK
+$ nvidia-smi -L on the host, and the driver binding
+GPU 0: NVIDIA GeForce RTX 4070 Ti SUPER (UUID: GPU-f758d3b3-9b42-b723-f657-d14b61eba586)
+/sys/bus/pci/drivers/nvidia/0000:00:07.0

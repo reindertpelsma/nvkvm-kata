@@ -5,17 +5,17 @@ container*, that runs the workload in a Kata Containers VM with an NVIDIA GPU
 reached through [nvkvm](https://github.com/reindertpelsma/nvkvm-pv) instead of
 VFIO passthrough. Stock Kata and `runc` keep working, unchanged, side by side.
 
-```yaml
-services:
-  cuda:
-    image: ubuntu:24.04
-    runtime: nvkvm-kata            # <- this is the whole user-facing surface
-    environment:
-      VISIBLE_CDI_DEVICES: nvidia.com/gpu=0
-      LD_LIBRARY_PATH: /usr/local/nvidia/lib
-    volumes:
-      - /opt/nvkvm-kata/nvidia/lib:/usr/local/nvidia/lib:ro
+```bash
+docker run --runtime=nvkvm-kata --gpus all --rm \
+    nvidia/cuda:13.3.1-cudnn-devel-ubuntu26.04 nvidia-smi
 ```
+
+`--runtime` is the whole user-facing surface. `--gpus` behaves as it does with
+`nvidia-container-toolkit`: the host driver's libraries arrive on their own,
+`libcuda.so.1` resolves without `LD_LIBRARY_PATH`, and `ldconfig` has run inside
+the container before your process starts. **No `volumes:` line, no
+`LD_LIBRARY_PATH`, no `VISIBLE_CDI_DEVICES`** — §7 and
+[09](design/09-gpu-libraries-automatically.md) are how.
 
 There are two ways to install it, and **both are first-class**:
 
@@ -534,45 +534,113 @@ established. No kubelet, no CRI, no device plugin, no scheduler, no
 `RuntimeClass` object. See
 [07 §11 item 3](design/07-end-to-end.md#11-what-is-still-not-done).
 
-## 7. The host driver's userspace
+## 7. The host driver's userspace — and why you never mount it
 
 The container needs NVIDIA userspace **version-matched to the host driver**,
 because the host driver is what services every forwarded ioctl. That falls out
-of the architecture: no version-matching machinery is needed, but the libraries
-do have to get in there.
+of the architecture. What does *not* fall out of it is getting the files in
+there, and this is the stage that does it.
 
 ```bash
-bash /root/nvkvm-pv/scripts/make_host_bundle.sh /var/lib/nvkvm-kata
-cp -a /var/lib/nvkvm-kata/host-libs-<version>/. /opt/nvkvm-kata/nvidia/lib/
-cd /opt/nvkvm-kata/nvidia/lib && for f in *.so.*; do
-    so=$(objdump -p "$f" | awk '/SONAME/{print $2}')
-    [ -n "$so" ] && ln -sf "$f" "$so"
-done
-gcc -O2 -o /opt/nvkvm-kata/nvidia/bin/vecadd scripts/e2e/vecadd.c -ldl
+# what the installer runs; safe to run by hand, idempotent
+python3 scripts/lib/gpu-cdi.py discover --out /var/lib/nvkvm-kata/gpu-mounts.json
 ```
 
-**The SONAME links are not optional.** Kata drops CDI's hooks
-(kata#11169), so *nothing* runs `ldconfig` inside the container:
-`libcuda.so.1` has to exist as a name on disk or every
-`dlopen("libcuda.so.1")` fails. The versioned symlink chain does survive
-virtio-fs — verified in [07 §6](design/07-end-to-end.md#6-rung-4--nvidia-smi).
+That is the whole install step. It runs **NVIDIA's own discovery** —
+`nvidia-ctk cdi generate`, the same command Kata's NVIDIA-GPU-passthrough path
+runs in its guest — and distils the result into a manifest of container mounts.
+Then, per container, the containerd shim wrapper from [§5d](#5d-the-containerd-shim-wrapper--half-one-of-the-selection-mechanism)
+calls the other half:
 
-This is an **install** step, not a build step: the bundle is host-specific by
+```bash
+/opt/nvkvm-kata/bin/nvkvm-kata-gpu-cdi inject --bundle "$PWD"
+```
+
+which edits the OCI `config.json` containerd has just written into the bundle.
+If the container did not ask for a GPU it does nothing at all.
+
+**`nvidia-container-toolkit` must be installed on the host.** That is not a new
+dependency: Docker only registers its `nvidia` device driver when
+`nvidia-container-runtime-hook` is on `PATH`, so without the toolkit
+`docker run --gpus all` fails with *"could not select device driver"* whatever
+runtime you name. `--install-deps` will install it.
+
+### What it does, and why each piece exists
+
+`nvidia-container-toolkit` does four things for a GPU container. Two of them
+survive a VM boundary and two do not — [09 §1](design/09-gpu-libraries-automatically.md#1-the-four-things-and-which-two-the-vm-breaks)
+has the measurement:
+
+1. **device nodes** — already handled, from the *guest's* `/dev`, via the
+   guest-side CDI spec (§4a). Host nodes are deliberately never injected: the
+   guest's `/dev/nvidia-uvm` has a different major.
+2. **the libraries** — added to the spec as mounts, from the manifest. They are
+   **version-postfixed** (`libcuda.so.575.51.03`), exactly as the toolkit
+   mounts them.
+3. **the device cgroup rule** — comes with the guest CDI `deviceNodes`, and is
+   then discarded by a Kata bug on cgroup v2 ([07 §8.1](design/07-end-to-end.md#81-finding-the-containers-device-cgroup-is-not-enforced-in-the-guest)).
+4. **SONAME symlinks and `/etc/ld.so.cache`, in the container's writable
+   layer** — a `createContainer` hook under runc, and **Kata deletes
+   host-injected hooks** (`src/runtime/virtcontainers/kata_agent.go:1055`,
+   `grpcSpec.Hooks = nil`). This is the one that used to force the manual
+   `LD_LIBRARY_PATH`, and it is handled two ways at once:
+
+   - each library is mounted a **second time at its SONAME path**, so
+     `libcuda.so.1` exists as a real file in a directory glibc searches by
+     default — no cache, no hook, no image support needed;
+   - and a `createContainer` hook **on the guest-side CDI spec** runs
+     `ldconfig` inside the container. Kata does not delete those — measured,
+     [09 §3](design/09-gpu-libraries-automatically.md#3-the-pivotal-measurement).
+     This matters more than it looks: NVIDIA's own images run
+     `ldconfig -p | grep libcuda.so.1` and set `NVIDIA_CPU_ONLY=1` when it
+     comes back empty, GPU or no GPU.
+
+Docker's `--gpus` also adds `nvidia-container-runtime-hook` as a **prestart**
+hook. Kata runs prestart hooks *on the host*, where that hook cannot work — it
+is kata#10672, and before this stage existed it made
+`docker run --runtime=nvkvm-kata --gpus all` fail outright rather than merely
+run without a GPU. The injector removes it.
+
+### Checking it by hand
+
+```bash
+python3 -m json.tool /var/lib/nvkvm-kata/gpu-mounts.json | head -30
+# 76 mounts on the reference host: 48 from nvidia-ctk verbatim,
+# 23 SONAME names, 5 from NVIDIA's own create-symlinks list.
+tail -5 /var/log/nvkvm-kata-gpu.log     # one line per GPU container started
+```
+
+The injector is silent on success **on purpose**: containerd parses the shim
+binary's *combined* output as the shim's ttrpc address, so a single stray byte
+on stdout or stderr turns into
+`failed to create TTRPC connection: dial unix …: connect: invalid argument`.
+It logs to the file above instead, and prints only when it is about to fail.
+
+This is an **install** step, not a build step: the manifest is host-specific by
 construction, and the NVIDIA libraries are not redistributable, so no prebuilt
-artifact can ever carry it.
+artifact can carry it. `inject` re-checks `/proc/driver/nvidia/version` against
+the manifest on every container and refuses loudly if the host driver has moved
+under it; re-run `discover --force` after a driver upgrade.
+
+The proof binary is still built here, because it is the harness's own:
+
+```bash
+gcc -O2 -o /opt/nvkvm-kata/nvidia/bin/vecadd scripts/e2e/vecadd.c -ldl
+```
 
 ## 8. Verify, by running the proof
 
 Not `ls`. Not "the service started". Run the workload.
 
 ```bash
-docker run --rm --runtime nvkvm-kata \
-  -v /opt/nvkvm-kata/nvidia/lib:/usr/local/nvidia/lib:ro \
+docker run --rm --runtime nvkvm-kata --gpus all \
   -v /opt/nvkvm-kata/nvidia/bin:/usr/local/nvidia/bin:ro \
-  -e VISIBLE_CDI_DEVICES=nvidia.com/gpu=0 \
-  -e LD_LIBRARY_PATH=/usr/local/nvidia/lib \
   ubuntu:24.04 /usr/local/nvidia/bin/vecadd
 ```
+
+The one bind mount left is the harness's own test binary. There is deliberately
+no driver-library volume and no `LD_LIBRARY_PATH`: if this command ever needs
+one back, §7 is broken.
 
 Expect:
 
@@ -594,11 +662,25 @@ Four more checks worth running, and all four are in the script's verify stage:
 docker run --rm --runtime nvkvm-kata ubuntu:24.04 uname -r      # -> <release>-nvkvm
 # the module loaded
 docker run --rm --runtime nvkvm-kata ubuntu:24.04 grep nvidia /proc/devices
+# the libraries arrived on their own, and resolve on their own
+docker run --rm --runtime nvkvm-kata --gpus all ubuntu:24.04 \
+    sh -c 'nvidia-smi -L; ldd /usr/bin/nvidia-smi | grep -c "not found"'   # -> 0
 # runc still works
 docker run --rm ubuntu:24.04 /bin/true
+# and a container that did NOT ask for a GPU still gets none
+docker run --rm --runtime nvkvm-kata ubuntu:24.04 ls /dev/nvidia0   # -> No such file
 # the host never lost the card
 nvidia-smi -L ; ls /sys/bus/pci/drivers/nvidia/
 ```
+
+The full user-facing command, on a stock CUDA image, with nothing else:
+
+```bash
+docker run --runtime=nvkvm-kata --gpus all --rm \
+    nvidia/cuda:13.3.1-cudnn-devel-ubuntu26.04 nvidia-smi
+```
+
+Transcript: [`docs/design/evidence/09/acceptance.log`](design/evidence/09/acceptance.log).
 
 ### When it fails
 
@@ -607,7 +689,14 @@ nvidia-smi -L ; ls /sys/bus/pci/drivers/nvidia/
 | `failed to create shim task: No such file or directory (os error 2)` | `/sbin/modprobe` missing or dangling in the guest rootfs — §4a, and the usrmerge trap |
 | container starts, `uname -r` is Kata's **stock** kernel | the `ConfigPath` runtime option did not reach the shim — §6. This is the silent failure; §5d's `KATA_CONF_FILE` exists to convert it into the next row |
 | `invalid KATA_CONF_FILE …: only shipped Kata configuration files are accepted` | no `ConfigPath` option was passed. Docker: §6b's `options`. `ctr`: `--runtime-config-path`. CRI: §6c |
-| no `/dev/nvidia*` in the container | `VISIBLE_CDI_DEVICES` unset, or the guest CDI generator did not run — §4a |
+| no `/dev/nvidia*` in the container | no `--gpus` and no `NVIDIA_VISIBLE_DEVICES`, or the guest CDI generator did not run — §4a, §7 |
+| `could not select device driver "" with capabilities: [[gpu]]` | `nvidia-container-toolkit` is not installed on the host. Docker needs it before `--gpus` works at all — §7 |
+| `CDI device(s) ["nvidia.com/gpu=1"] do not exist` | you asked for more GPUs than the guest has — `--gpus 2` on a one-card host |
+| `failed to create TTRPC connection: dial unix  <text>` | something the shim wrapper runs printed to stdout or stderr; containerd parses that as the shim's address — §7 |
+| `nvidia-container-cli: mount error: … /proc/driver/nvidia: no such file` | Docker's prestart hook reached Kata. The injector should have removed it: check `/var/log/nvkvm-kata-gpu.log` and that `$PWD/config.json` was editable — §7 |
+| `could not insert 'nvkvm_guest': Invalid argument` | **usually not the module.** kmod reports a failing `modprobe.d install` command this way; the generator it chains to is the likely culprit — [09 §8](design/09-gpu-libraries-automatically.md#8-two-traps-recorded-because-each-cost-real-time) |
+| `SpecError { message: "spec error message parse spec file failed" }` | the guest CDI YAML at `/var/run/cdi/nvkvm.yaml` does not parse — [09 §8](design/09-gpu-libraries-automatically.md#8-two-traps-recorded-because-each-cost-real-time) |
+| image prints `The NVIDIA Driver was not detected` but the GPU works | the ldcache hook did not run, or the image has no `ldconfig` — §7 |
 | `cuInit` fails / no `libcuda.so.1` | the SONAME links in §7 |
 | VM boots but no `virtio-nvgpu` device | wrong QEMU at `NVKVM_QEMU`, or a QEMU built without nvkvm's patches — §2 |
 | `unknown or invalid runtime name` from Docker | Docker < 23.0, or `daemon.json` not reloaded — §6b |
@@ -686,14 +775,19 @@ which is two, not many.
 
 Named here so nobody has to find out the hard way.
 
-1. **Kubernetes is untested.** §6c writes the CRI handler; no kubelet has ever
+0. **`NVIDIA_DRIVER_CAPABILITIES` does not filter the library set.** Devices are
+   selected the same way `nvidia-container-toolkit` selects them; capabilities
+   are passed through to the container but not acted on — because NVIDIA's own
+   CDI mode does not act on them either. [09 §7](design/09-gpu-libraries-automatically.md#7-capabilities-the-one-thing-that-does-not-transfer).
+1. **Multi-GPU selection is untested.** One card on the test host.
+2. **Kubernetes is untested.** §6c writes the CRI handler; no kubelet has ever
    used it. No device plugin, no scheduler integration,
    no `RuntimeClass` object is created.
-2. **`VISIBLE_CDI_DEVICES` is not an access boundary** on cgroup v2 —
+3. **`VISIBLE_CDI_DEVICES` / `--gpus` is not an access boundary** on cgroup v2 —
    [07 §8.1](design/07-end-to-end.md#81-finding-the-containers-device-cgroup-is-not-enforced-in-the-guest).
    A container that asks for no GPU can still use one. Do not deploy this
    multi-tenant.
-3. **The VMM is not confined.** Kata jails Firecracker and enables Cloud
+4. **The VMM is not confined.** Kata jails Firecracker and enables Cloud
    Hypervisor's seccomp; its QEMU driver gets neither, and nvkvm is QEMU-only —
    [01 §3](design/01-vmm-confinement.md), [06](design/06-vmm-confinement-design.md).
    The shim is the natural place to add `unshare`/`setpriv`, and that has not

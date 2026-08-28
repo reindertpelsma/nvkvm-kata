@@ -1,0 +1,95 @@
+===MOUNT===
+overlay on / type overlay (rw,relatime,lowerdir=/var/lib/docker/overlay2/l/O66UXXJCQ6JP5POVRDO6TNQWKK:/var/lib/docker/overlay2/l/3G4TU5OHSMVGSOIXLA5OJMODQK:/var/lib/docker/overlay2/l/MIHM3GNTW3CJXXLJVIUDJEAQTU,upperdir=/var/lib/docker/overlay2/4c7ef83a76bb93acf2204cb9d6d0913ec8f3d1a16fcb206a7f1de0c0cb147123/diff,workdir=/var/lib/docker/overlay2/4c7ef83a76bb93acf2204cb9d6d0913ec8f3d1a16fcb206a7f1de0c0cb147123/work,nouserxattr)
+proc on /proc type proc (rw,nosuid,nodev,noexec,relatime)
+tmpfs on /dev type tmpfs (rw,nosuid,size=65536k,mode=755,inode64)
+devpts on /dev/pts type devpts (rw,nosuid,noexec,relatime,gid=5,mode=620,ptmxmode=666)
+sysfs on /sys type sysfs (ro,nosuid,nodev,noexec,relatime)
+cgroup on /sys/fs/cgroup type cgroup2 (ro,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot)
+mqueue on /dev/mqueue type mqueue (rw,nosuid,nodev,noexec,relatime)
+shm on /dev/shm type tmpfs (rw,nosuid,nodev,noexec,relatime,size=65536k,inode64)
+/dev/root on /etc/resolv.conf type ext4 (rw,relatime,discard,errors=remount-ro)
+/dev/root on /etc/hostname type ext4 (rw,relatime,discard,errors=remount-ro)
+/dev/root on /etc/hosts type ext4 (rw,relatime,discard,errors=remount-ro)
+tmpfs on /proc/driver/nvidia type tmpfs (rw,nosuid,nodev,noexec,relatime,mode=555,inode64)
+/dev/root on /usr/bin/nvidia-smi type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/bin/nvidia-debugdump type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/bin/nvidia-persistenced type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/bin/nvidia-cuda-mps-control type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/bin/nvidia-cuda-mps-server type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.575.51.03 type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/lib/x86_64-linux-gnu/libnvidia-cfg.so.575.51.03 type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/lib/x86_64-linux-gnu/libcuda.so.575.51.03 type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/lib/x86_64-linux-gnu/libcudadebugger.so.575.51.03 type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/lib/x86_64-linux-gnu/libnvidia-opencl.so.575.51.03 type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/lib/x86_64-linux-gnu/libnvidia-gpucomp.so.575.51.03 type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.575.51.03 type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.575.51.03 type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/lib/x86_64-linux-gnu/libnvidia-pkcs11-openssl3.so.575.51.03 type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.575.51.03 type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/lib/firmware/nvidia/575.51.03/gsp_ga10x.bin type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+/dev/root on /usr/lib/firmware/nvidia/575.51.03/gsp_tu10x.bin type ext4 (ro,nosuid,nodev,relatime,discard,errors=remount-ro)
+devtmpfs on /dev/nvidiactl type devtmpfs (ro,nosuid,noexec,relatime,size=103826564k,nr_inodes=25956641,mode=755,inode64)
+devtmpfs on /dev/nvidia-uvm type devtmpfs (ro,nosuid,noexec,relatime,size=103826564k,nr_inodes=25956641,mode=755,inode64)
+devtmpfs on /dev/nvidia-uvm-tools type devtmpfs (ro,nosuid,noexec,relatime,size=103826564k,nr_inodes=25956641,mode=755,inode64)
+devtmpfs on /dev/nvidia0 type devtmpfs (ro,nosuid,noexec,relatime,size=103826564k,nr_inodes=25956641,mode=755,inode64)
+proc on /proc/driver/nvidia/gpus/0000:00:07.0 type proc (ro,nosuid,nodev,noexec,relatime)
+proc on /proc/bus type proc (ro,nosuid,nodev,noexec,relatime)
+proc on /proc/fs type proc (ro,nosuid,nodev,noexec,relatime)
+proc on /proc/irq type proc (ro,nosuid,nodev,noexec,relatime)
+proc on /proc/sys type proc (ro,nosuid,nodev,noexec,relatime)
+proc on /proc/sysrq-trigger type proc (ro,nosuid,nodev,noexec,relatime)
+tmpfs on /proc/asound type tmpfs (ro,relatime,inode64)
+tmpfs on /proc/acpi type tmpfs (ro,relatime,inode64)
+tmpfs on /proc/interrupts type tmpfs (rw,nosuid,size=65536k,mode=755,inode64)
+tmpfs on /proc/kcore type tmpfs (rw,nosuid,size=65536k,mode=755,inode64)
+tmpfs on /proc/keys type tmpfs (rw,nosuid,size=65536k,mode=755,inode64)
+tmpfs on /proc/latency_stats type tmpfs (rw,nosuid,size=65536k,mode=755,inode64)
+tmpfs on /proc/timer_list type tmpfs (rw,nosuid,size=65536k,mode=755,inode64)
+tmpfs on /proc/scsi type tmpfs (ro,relatime,inode64)
+tmpfs on /sys/firmware type tmpfs (ro,relatime,inode64)
+
+===LIBDIR_NVIDIA===
+lrwxrwxrwx  1 root root       12 Aug 28 02:21 libcuda.so -> libcuda.so.1
+lrwxrwxrwx  1 root root       20 Aug 28 02:21 libcuda.so.1 -> libcuda.so.575.51.03
+-rw-r--r--  1 root root 92316728 Apr 16  2025 libcuda.so.575.51.03
+lrwxrwxrwx  1 root root       28 Aug 28 02:21 libcudadebugger.so.1 -> libcudadebugger.so.575.51.03
+-rw-r--r--  1 root root  9742088 Apr  9  2025 libcudadebugger.so.575.51.03
+lrwxrwxrwx  1 root root       32 Aug 28 02:21 libnvidia-allocator.so.1 -> libnvidia-allocator.so.575.51.03
+-rw-r--r--  1 root root   177192 Apr 16  2025 libnvidia-allocator.so.575.51.03
+lrwxrwxrwx  1 root root       26 Aug 28 02:21 libnvidia-cfg.so.1 -> libnvidia-cfg.so.575.51.03
+-rw-r--r--  1 root root   407512 Apr 16  2025 libnvidia-cfg.so.575.51.03
+-rw-r--r--  1 root root 68559648 Apr 16  2025 libnvidia-gpucomp.so.575.51.03
+lrwxrwxrwx  1 root root       25 Aug 28 02:21 libnvidia-ml.so.1 -> libnvidia-ml.so.575.51.03
+-rw-r--r--  1 root root  2291800 Apr 16  2025 libnvidia-ml.so.575.51.03
+lrwxrwxrwx  1 root root       27 Aug 28 02:21 libnvidia-nvvm.so.4 -> libnvidia-nvvm.so.575.51.03
+-rw-r--r--  1 root root 78079592 Apr 16  2025 libnvidia-nvvm.so.575.51.03
+lrwxrwxrwx  1 root root       29 Aug 28 02:21 libnvidia-opencl.so.1 -> libnvidia-opencl.so.575.51.03
+-rw-r--r--  1 root root 86513296 Apr 16  2025 libnvidia-opencl.so.575.51.03
+-rw-r--r--  1 root root    10176 Apr 16  2025 libnvidia-pkcs11-openssl3.so.575.51.03
+lrwxrwxrwx  1 root root       37 Aug 28 02:21 libnvidia-ptxjitcompiler.so.1 -> libnvidia-ptxjitcompiler.so.575.51.03
+-rw-r--r--  1 root root 40562320 Apr 16  2025 libnvidia-ptxjitcompiler.so.575.51.03
+
+===BIN===
+-rwxr-xr-x 1 root root   66624 Apr 16  2025 /usr/bin/nvidia-cuda-mps-control
+-rwxr-xr-x 1 root root   18664 Apr 16  2025 /usr/bin/nvidia-cuda-mps-server
+-rwxr-xr-x 1 root root  142064 Apr 16  2025 /usr/bin/nvidia-debugdump
+-rwxr-xr-x 1 root root  212448 Apr 16  2025 /usr/bin/nvidia-persistenced
+-rwxr-xr-x 1 root root 1176448 Apr 16  2025 /usr/bin/nvidia-smi
+
+===LDCACHE===
+	libnvidia-ptxjitcompiler.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1
+	libnvidia-pkcs11-openssl3.so.575.51.03 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libnvidia-pkcs11-openssl3.so.575.51.03
+	libnvidia-opencl.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libnvidia-opencl.so.1
+	libnvidia-nvvm.so.4 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4
+	libnvidia-ml.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1
+	libnvidia-gpucomp.so.575.51.03 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libnvidia-gpucomp.so.575.51.03
+	libnvidia-cfg.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libnvidia-cfg.so.1
+	libnvidia-allocator.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1
+	libcudadebugger.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libcudadebugger.so.1
+	libcuda.so.1 (libc6,x86-64) => /usr/lib/x86_64-linux-gnu/libcuda.so.1
+
+===DEV===
+crw-rw-rw- 1 root root 236,   0 Aug 28 02:19 /dev/nvidia-uvm
+crw-rw-rw- 1 root root 236,   1 Aug 28 02:19 /dev/nvidia-uvm-tools
+crw-rw-rw- 1 root root 195,   0 Aug 28 02:19 /dev/nvidia0
+crw-rw-rw- 1 root root 195, 255 Aug 28 02:19 /dev/nvidiactl
