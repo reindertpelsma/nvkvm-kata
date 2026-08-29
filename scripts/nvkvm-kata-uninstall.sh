@@ -113,8 +113,12 @@ PY
 fi
 
 # ── 2. the manifest, in reverse order of creation ────────────────────────────
+# RESTORED holds every path section 3 must not then delete.  A plain variable
+# rather than a file: the `while` below runs in a subshell behind the pipe, so
+# it is collected from the loop's stdout instead of assigned inside it.
+RESTORED=""
 if [ -f "$MANIFEST" ]; then
-    tac "$MANIFEST" | while IFS=$'\t' read -r kind path note; do
+    RESTORED="$(tac "$MANIFEST" | while IFS=$'\t' read -r kind path note; do
         [ -n "${path:-}" ] || continue
         case "$kind" in
             created)
@@ -128,18 +132,32 @@ if [ -f "$MANIFEST" ]; then
             modified)
                 if [ -n "${note:-}" ] && [ -e "$note" ]; then
                     cp -a "$note" "$path"; change "restored $path from backup"
+                    printf '%s\n' "$path"
                 else
                     warn "no backup recorded for $path -- left as it is"
+                    printf '%s\n' "$path"
                 fi
                 ;;
         esac
-    done
+    done)"
 fi
 
 # ── 3. the well-known paths, whether or not the manifest mentioned them ──────
+#
+# EXCEPT the ones section 2 just restored.  These three paths can pre-date the
+# install: an admin who already had /etc/kata-containers/configuration-nvkvm.toml
+# or a shim on PATH gets it recorded as `modified` with a backup, and section 2
+# puts their file back byte for byte -- and then this loop deleted it, one line
+# later, because the path is on a list of things "we" own.  The net effect was
+# an uninstaller that destroyed exactly the files it had gone to the trouble of
+# preserving, and reported both actions as successes.  A path we restored was
+# not ours; the list here is only for paths the manifest never mentioned,
+# which is what it was for.
+restored_p() { printf '%s\n' "$RESTORED" | grep -qxF "$1"; }
 for p in "/usr/local/bin/containerd-shim-${RUNTIME_NAME}-v2" \
          "/etc/kata-containers/configuration-nvkvm.toml" \
          "/etc/nvkvm-kata/shim.env"; do
+    if restored_p "$p"; then ok "$p restored from backup -- not ours to delete"; continue; fi
     [ -e "$p" ] && { rm -f "$p"; change "$p"; }
 done
 [ -d /etc/nvkvm-kata ] && rmdir /etc/nvkvm-kata 2>/dev/null && change "/etc/nvkvm-kata"
@@ -151,6 +169,17 @@ if [ "$PURGE" = 1 ]; then
     rm -rf "$STATE"; change "$STATE (build artifacts and backups)"
 else
     rm -f "$MANIFEST"
+    # THE BACKUPS ARE ROTATED, NOT KEPT IN PLACE.  The installer's backup_once
+    # takes a backup only when one does not already exist, so a $BACKUP left
+    # here becomes the baseline for the NEXT install cycle -- one cycle out of
+    # date.  An operator who edits /etc/docker/daemon.json after this uninstall
+    # then has that edit silently overwritten by the next uninstall, restoring
+    # a file from two cycles ago.  Moving them aside starts the next cycle
+    # clean while keeping this cycle's originals for anyone who needs them.
+    if [ -d "$BACKUP" ]; then
+        mv "$BACKUP" "$BACKUP.reverted-$(date +%Y%m%d-%H%M%S)" 2>/dev/null \
+            && ok "backups rotated to $BACKUP.reverted-* (this cycle's originals, already restored above)"
+    fi
     ok "kept $STATE (build artifacts) -- pass --purge to delete, re-install is fast without a rebuild"
 fi
 

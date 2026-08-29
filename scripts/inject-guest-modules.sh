@@ -66,6 +66,9 @@ fi
 SRC="$MODULES/lib/modules/$RELEASE"
 [ -d "$SRC" ] || die "$SRC does not exist"
 
+# shellcheck source=lib/image-lock.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/image-lock.sh"
+
 # --- build the exact tree we want inside the guest, in a temp dir -----------
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
@@ -120,15 +123,20 @@ install_into() {   # $1 = rootfs mount point
 
 if [ -n "$IMAGE" ]; then
     step "injecting into disk image $IMAGE"
+    # One editor per image, and a mount point private to this run: the
+    # hardcoded /mnt/nvkvm-rootfs used to be shadowed by
+    # prepare-guest-rootfs.sh's /mnt/nvkvm-prep on a concurrent run, and the
+    # loser wrote its files into the winner's image.  See lib/image-lock.sh.
+    nvkvm_lock_image "$IMAGE"
+    MNT="$(nvkvm_mktemp_mnt rootfs)"
     cp -f "$IMAGE" "$IMAGE.orig" 2>/dev/null || true
     LOOP="$(losetup -f --show -P "$IMAGE")"
-    trap 'umount /mnt/nvkvm-rootfs 2>/dev/null || true; losetup -d "$LOOP" 2>/dev/null || true; rm -rf "$STAGE"' EXIT
+    trap 'umount "$MNT" 2>/dev/null || true; losetup -d "$LOOP" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true; rm -rf "$STAGE"' EXIT
     PART="$(wait_for_part "$LOOP")"
-    mkdir -p /mnt/nvkvm-rootfs
-    mount "$PART" /mnt/nvkvm-rootfs
-    df -h /mnt/nvkvm-rootfs | tail -1
-    install_into /mnt/nvkvm-rootfs
-    sync ; umount /mnt/nvkvm-rootfs ; losetup -d "$LOOP"
+    mount "$PART" "$MNT"
+    df -h "$MNT" | tail -1
+    install_into "$MNT"
+    sync ; umount "$MNT" ; losetup -d "$LOOP" ; rmdir "$MNT" 2>/dev/null || true
     trap 'rm -rf "$STAGE"' EXIT
     echo "OK: $IMAGE updated (original saved as $IMAGE.orig)"
 else

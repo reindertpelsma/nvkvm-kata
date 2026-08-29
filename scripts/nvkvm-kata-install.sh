@@ -75,6 +75,9 @@ MANIFEST="$STATE/install-manifest"
 PREFIX=/opt/nvkvm-kata
 RUNTIME_NAME=nvkvm-kata
 KATA_VERSION=4.1.0
+# Named separately so the "no pinned digest" error can point at the version
+# that HAS one, rather than at whatever --kata-version the operator just typed.
+KATA_VERSION_DEFAULT=4.1.0
 KATA_CONF_DIR=/etc/kata-containers
 SHIM_ENV=/etc/nvkvm-kata/shim.env
 GRAPHICS=0
@@ -168,7 +171,26 @@ backup_once() {    # path -- copy to $BACKUP the first time we touch it
     local p="$1"
     local b="$BACKUP/$(echo "${p#/}" | tr / _)"
     mkdir -p "$BACKUP"
-    if [ -e "$b" ] || [ -e "$b.ABSENT" ]; then return 0; fi
+    #
+    # ONCE PER INSTALL CYCLE, NOT ONCE PER HOST.  This used to `return 0` the
+    # moment a backup file existed, which also skipped the manifest_add -- so on
+    # the SECOND install cycle it recorded nothing at all, and the uninstaller,
+    # which reads the manifest and nothing else, silently reverted nothing.  The
+    # "exact revert" property held only for the first install ever performed on
+    # a host, which is not a property anyone would have assumed from the name.
+    #
+    # It is also why a stale backup could be restored over a good file: an
+    # uninstall without --purge keeps $BACKUP, so an operator's own later edit
+    # to /etc/docker/daemon.json was never backed up on the next install and
+    # was overwritten on the next uninstall by a copy from the cycle before.
+    # The uninstaller now rotates $BACKUP aside when it finishes, so an existing
+    # backup here really does belong to the cycle in progress.
+    #
+    # The manifest entry is written on EVERY call.  manifest_add is idempotent
+    # (it greps for the exact line first), so re-recording costs nothing and
+    # the record is complete whichever call first touched the path.
+    if [ -e "$b" ]; then       manifest_add modified "$p" "$b";       return 0; fi
+    if [ -e "$b.ABSENT" ]; then manifest_add created "$p" "$b.ABSENT"; return 0; fi
     if [ -e "$p" ]; then cp -a "$p" "$b"; manifest_add modified "$p" "$b"
     else                 : > "$b.ABSENT";  manifest_add created  "$p" "$b.ABSENT"; fi
 }
@@ -614,7 +636,88 @@ resolve_sources() {
 
 # ═════════════════════════════════════════════════════════════════════════════
 # STAGE 1 -- KATA.  docs/install.md §1
+#
+# TWO TARBALLS, DOWNLOADED AND EXTRACTED TO `/` AS ROOT.  Until now that was
+# done on nothing but "curl -f succeeded", which is the weakest check in this
+# installer guarding the most privileged action in it.  Both halves are closed
+# below, and they close different things:
+#
+#   verify_kata_tarball   -- pins the SHA-256 of each release artifact.  The
+#       digests come from GitHub's own release API, so this pins the artifact
+#       rather than independently authenticating it: what it buys is that a
+#       retagged or re-uploaded release stops the install instead of silently
+#       changing what runs the guests.  Unknown versions (--kata-version) have
+#       no pin and are refused unless the operator says so explicitly, because
+#       the alternative is a flag whose use is indistinguishable from the
+#       default.
+#
+#   assert_tar_confined   -- reads the member list BEFORE extracting and
+#       refuses anything outside opt/kata/: an absolute path, a `..`, or a
+#       symlink pointing out of the tree.  GNU tar strips a leading `/` but
+#       follows an existing symlink on the way in, so `-C /` on an archive
+#       nobody has looked at is a write-anywhere primitive.  This costs one
+#       decompression pass over an archive we are about to decompress anyway.
 # ═════════════════════════════════════════════════════════════════════════════
+
+# Recorded 2026-08-29 from the GitHub release API for tag 4.1.0.
+# To add a version: curl the release JSON and read each asset's `digest`.
+# shellcheck disable=SC2034  # read by indirect expansion in verify_kata_tarball
+KATA_SHA256_kata_static_4_1_0=3dc6b69c4acb787b967b04b64599a20d02a8beb1a8eaab3084110df9d0b08c96
+# shellcheck disable=SC2034  # read by indirect expansion in verify_kata_tarball
+KATA_SHA256_kata_go_static_4_1_0=8b32080424c884238ee8d52060fdfd060fbe2b5fdfa4eb9ff2772b382b432b55
+
+verify_kata_tarball() {   # <artifact name> <file>
+    local a="$1" f="$2" var want got
+    var="KATA_SHA256_$(printf '%s_%s' "$a" "$KATA_VERSION" | tr '.-' '__')"
+    want="${!var:-}"
+    if [ -z "$want" ]; then
+        [ "${NVKVM_KATA_ALLOW_UNPINNED:-0}" = 1 ] || die \
+            "no pinned SHA-256 for $a $KATA_VERSION" \
+            "this installer extracts that tarball to / as root. Either use a pinned version (default $KATA_VERSION_DEFAULT), add the digest to $var in this script, or set NVKVM_KATA_ALLOW_UNPINNED=1 if you have checked it yourself"
+        warn "$a $KATA_VERSION has no pinned digest and NVKVM_KATA_ALLOW_UNPINNED=1 -- extracting it unverified"
+        return 0
+    fi
+    got="$(sha256sum "$f" | cut -d' ' -f1)"
+    [ "$got" = "$want" ] || die \
+        "SHA-256 mismatch for $a $KATA_VERSION" \
+        "expected $want, got $got -- do not extract this; the release was re-uploaded, or the download was tampered with"
+    ok "$a $KATA_VERSION matches its pinned digest"
+}
+
+assert_tar_confined() {   # <tarball> <required top-level prefix>
+    local f="$1" prefix="$2" listing bad allow acc comp rest
+    # The ANCESTORS of the prefix are legitimate members: an archive rooted at
+    # opt/kata/ still carries `opt/` itself, and a check that rejected that
+    # would reject every real Kata release -- a check nobody can ship is worse
+    # than none, because it gets deleted rather than fixed.  Build the allowed
+    # set from the prefix's own components instead of hardcoding it.
+    allow=""; acc=""; rest="$prefix"
+    while [ -n "$rest" ]; do
+        comp="${rest%%/*}"
+        acc="${acc:+$acc/}$comp"
+        allow="${allow:+$allow|}$acc/?"
+        case "$rest" in *"/"*) rest="${rest#*/}" ;; *) rest="" ;; esac
+    done
+    # The listing is captured WHOLE before anything filters it.  A
+    # `tar -tf | grep | head` pipeline under `set -o pipefail` dies with a bare
+    # exit 141 the moment head closes the pipe on a large archive -- the same
+    # SIGPIPE trap that silently broke fetch_deb_kmod in this repo.
+    listing="$(tar -I zstd -tf "$f" 2>/dev/null)" \
+        || die "could not list $(basename "$f")" "the archive is truncated, or not zstd"
+    # Absolute members and any `..` component are rejected outright: GNU tar
+    # strips a leading `/` but still follows a symlink already on disk, so
+    # `-C /` on an archive nobody has read is a write-anywhere primitive.
+    # `.` / `./` is the archive root and is a real member of both Kata
+    # tarballs -- VERIFIED against the published kata-static-4.1.0, whose first
+    # member is exactly `./`.  Omitting it here would reject every genuine
+    # release, which is how a confinement check turns into a deleted one.
+    bad="$(printf '%s\n' "$listing" | grep -vE "^(\.|\./|(\./)?($allow|$prefix/.+))\$" || true)"
+    bad="$bad$(printf '%s\n' "$listing" | grep -E '(^|/)\.\.(/|$)' || true)"
+    [ -z "$bad" ] || die \
+        "$(basename "$f") has members outside $prefix/ -- refusing to extract it to /" \
+        "first offenders: $(printf '%s\n' "$bad" | sed -n '1,5p' | tr '\n' ' ')"
+}
+
 stage_kata() {
     step "stage 1/8  Kata Containers"
     detect_kata
@@ -629,6 +732,8 @@ stage_kata() {
             url="https://github.com/kata-containers/kata-containers/releases/download/${KATA_VERSION}/${a}-${KATA_VERSION}-amd64.tar.zst"
             change "fetching $a $KATA_VERSION"
             curl -fsSL -o "$STATE/$a.tar.zst" "$url" || die "download failed: $url" "check the version with --kata-version"
+            verify_kata_tarball "$a" "$STATE/$a.tar.zst"
+            assert_tar_confined "$STATE/$a.tar.zst" opt/kata
             tar -I zstd -xf "$STATE/$a.tar.zst" -C / || die "extract failed for $a" "check disk space in /opt"
             rm -f "$STATE/$a.tar.zst"
         done
@@ -757,7 +862,31 @@ stage_rootfs() {
 
     NVKVM_IMAGE="$ARTIFACTS/kata-nvkvm.image"
     local stamp="$ARTIFACTS/rootfs.stamp"
-    local want_stamp; want_stamp="rel=$rel stock=$(sha256sum "$stock" | cut -c1-16)"
+    #
+    # THE STAMP HAS TO COVER EVERY INPUT, not just the stock image.
+    #
+    # It used to be `rel=<kernel release> stock=<hash of the stock image>`, and
+    # neither term moves when the thing that actually changed is ours:
+    #
+    #   * update this repo -- a fix to prepare-guest-rootfs.sh's CDI generator,
+    #     say -- and the stamp still matches, so the stage says "already built"
+    #     and the fix never reaches the image.  The comment above this stage
+    #     says it is "idempotent by construction" because it always rebuilds
+    #     from pristine stock; the stamp is exactly the cleanup-shaped shortcut
+    #     that claim rules out, and it is what made the claim untrue.
+    #
+    #   * change nvkvm-guest's source and rebuild stage 3, and $rel is unchanged
+    #     whenever the kernel release is -- which it usually is.  The rootfs
+    #     then keeps the OLD module while the kernel stamp reports a new build,
+    #     and the guest runs a module that does not match the source tree.
+    #
+    # kernel= folds in stage 3's stamp, which already carries the nvkvm commit;
+    # tools= folds in the two scripts that do the editing.
+    local kstamp; kstamp="$(cat "$ARTIFACTS/kernel.stamp" 2>/dev/null || echo none)"
+    local tools; tools="$(sha256sum "$HERE/prepare-guest-rootfs.sh" "$HERE/inject-guest-modules.sh" \
+                            "$HERE/lib/image-lock.sh" 2>/dev/null | sha256sum | cut -c1-16)"
+    local want_stamp
+    want_stamp="rel=$rel stock=$(sha256sum "$stock" | cut -c1-16) kernel=$kstamp tools=$tools"
     if [ "$FORCE" = 0 ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want_stamp" ] && [ -f "$NVKVM_IMAGE" ]; then
         ok "already built: $NVKVM_IMAGE (stamp matches)"
         return 0

@@ -72,6 +72,9 @@ done
 #
 # A container engine is still used if one happens to be present and the
 # download fails, and --kmod-from short-circuits both for an offline build.
+# shellcheck source=lib/image-lock.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/image-lock.sh"
+
 STAGE="$(mktemp -d)" ; trap 'rm -rf "$STAGE"' EXIT
 UBUNTU_SUITE="noble"
 case "$UBUNTU" in 24.04) UBUNTU_SUITE=noble ;; 22.04) UBUNTU_SUITE=jammy ;; 26.04) UBUNTU_SUITE=resolute ;; esac
@@ -395,13 +398,18 @@ MC
 if [ -n "$ROOTFS" ]; then
     install_into "$ROOTFS"
 else
+    # One editor per image, and a mount point private to this run: the
+    # hardcoded /mnt/nvkvm-prep used to be shadowed by inject-guest-modules.sh's
+    # /mnt/nvkvm-rootfs on a concurrent run.  See scripts/lib/image-lock.sh.
+    nvkvm_lock_image "$IMAGE"
+    MNT="$(nvkvm_mktemp_mnt prep)"
     LOOP="$(losetup -f --show -P "$IMAGE")"
-    trap 'umount /mnt/nvkvm-prep 2>/dev/null||true; losetup -d "$LOOP" 2>/dev/null||true; rm -rf "$STAGE"' EXIT
+    trap 'umount "$MNT" 2>/dev/null||true; losetup -d "$LOOP" 2>/dev/null||true; rmdir "$MNT" 2>/dev/null||true; rm -rf "$STAGE"' EXIT
     PART="$(wait_for_part "$LOOP")"
-    mkdir -p /mnt/nvkvm-prep && mount "$PART" /mnt/nvkvm-prep
-    install_into /mnt/nvkvm-prep
-    df -h /mnt/nvkvm-prep | tail -1
-    sync; umount /mnt/nvkvm-prep; losetup -d "$LOOP"
+    mount "$PART" "$MNT"
+    install_into "$MNT"
+    df -h "$MNT" | tail -1
+    sync; umount "$MNT"; losetup -d "$LOOP"; rmdir "$MNT" 2>/dev/null || true
     trap 'rm -rf "$STAGE"' EXIT
     echo "OK: $IMAGE prepared"
 fi
