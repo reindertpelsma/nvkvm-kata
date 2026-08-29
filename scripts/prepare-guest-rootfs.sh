@@ -77,22 +77,49 @@ UBUNTU_SUITE="noble"
 case "$UBUNTU" in 24.04) UBUNTU_SUITE=noble ;; 22.04) UBUNTU_SUITE=jammy ;; 26.04) UBUNTU_SUITE=resolute ;; esac
 
 fetch_deb_kmod() {
-    local mirror pkgs url ver
-    for mirror in http://archive.ubuntu.com/ubuntu http://us.archive.ubuntu.com/ubuntu; do
-        pkgs="$(curl -fsSL --max-time 60 "$mirror/dists/$UBUNTU_SUITE/main/binary-amd64/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null)" || continue
+    local mirror pkgs line url sha got
+    # https, and verified.  This .deb becomes the guest's /sbin/modprobe, which
+    # kata-agent runs as guest ROOT at create_sandbox before any container
+    # starts -- so over plain http, anyone who can answer for
+    # archive.ubuntu.com on the install host's network owns every Kata guest
+    # this node ever boots.  TLS authenticates the index; the SHA256 that index
+    # has been carrying all along then authenticates the .deb itself.  Both,
+    # because the index is what tells us which file to trust.
+    command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required to verify the kmod .deb"
+    for mirror in https://archive.ubuntu.com/ubuntu https://us.archive.ubuntu.com/ubuntu; do
+        pkgs="$(curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 "$mirror/dists/$UBUNTU_SUITE/main/binary-amd64/Packages.gz" 2>/dev/null | gzip -dc 2>/dev/null)" || continue
         [ -n "$pkgs" ] || continue
         # The stanza for the binary package named exactly "kmod".
         # Paragraph mode with FS="\n" so each field is a whole line -- a plain
         # `awk -v RS=''` splits on whitespace and the ^Package: kmod$ anchor
         # then never matches, silently yielding an empty URL.
-        url="$(printf '%s' "$pkgs" | awk 'BEGIN{RS="";FS="\n"}
-              { pkg=""; fn="";
+        # Emit the stanza's SHA256 next to the Filename; a stanza without one is
+        # not usable, so it is skipped rather than trusted.
+        line="$(printf '%s' "$pkgs" | awk 'BEGIN{RS="";FS="\n"}
+              { pkg=""; fn=""; sha="";
                 for(i=1;i<=NF;i++){ if($i ~ /^Package: /) pkg=substr($i,10);
-                                    else if($i ~ /^Filename: /) fn=substr($i,11) }
-                if(pkg=="kmod" && fn!=""){ print fn; exit } }')"
-        [ -n "$url" ] || continue
+                                    else if($i ~ /^Filename: /) fn=substr($i,11);
+                                    else if($i ~ /^SHA256: /) sha=substr($i,9) }
+                if(pkg=="kmod" && fn!="" && sha!=""){ print fn, sha; exit } }')" || true
+        # `|| true` because awk exits at the first match while printf still has
+        # ~7 MB of index to write: printf takes SIGPIPE, and `set -o pipefail`
+        # then made this assignment fail and `set -e` killed the whole install
+        # with exit 141 and not one word of output.  MEASURED against the real
+        # noble index on 2026-08-29.  An empty $line is caught on the next line.
+        url="${line%% *}"; sha="${line##* }"
+        [ -n "$url" ] && [ -n "$sha" ] && [ "$url" != "$sha" ] || continue
         echo "  fetching $mirror/$url"
-        curl -fsSL --max-time 300 -o "$STAGE/kmod.deb" "$mirror/$url" || continue
+        curl -fsSL --proto '=https' --tlsv1.2 --max-time 300 -o "$STAGE/kmod.deb" "$mirror/$url" || continue
+        got="$(sha256sum "$STAGE/kmod.deb" | awk '{print $1}')"
+        if [ "$got" != "$sha" ]; then
+            # Fail closed, and do NOT fall through to the next mirror or to the
+            # container path: index and file disagreeing is either corruption or
+            # someone in the middle, and neither is a thing to install as the
+            # guest's root-run modprobe.  Stop, and say both digests.
+            rm -f "$STAGE/kmod.deb"
+            die "kmod .deb SHA256 mismatch from $mirror/$url: index says $sha, got $got"
+        fi
+        echo "  verified sha256 $sha"
         ( cd "$STAGE" && ar x kmod.deb && mkdir -p x \
           && tar -xf data.tar.* -C x ) || continue
         # Ubuntu ships /usr/bin/kmod plus applet symlinks; we only need the binary.
