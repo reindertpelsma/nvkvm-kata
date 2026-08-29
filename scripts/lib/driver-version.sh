@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # nvkvm-kata -- parse the NVIDIA driver version out of /proc/driver/nvidia/version.
 #
 # Sourced by nvkvm-kata-install.sh.  Exercised, together with gpu-cdi.py's
