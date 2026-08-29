@@ -44,6 +44,26 @@ returns 0. That failure looks environmental to nested virtualisation rather than
 a defect in the forwarding path, which matters because a sweep full of
 `cuInit rc=999` would otherwise read as a driver-matrix catastrophe.
 
+## The 0xcb33 alloc-param gap: closed, and it was NOT the cause
+
+VERIFIED on the PC, 2026-08-30. nvkvm-pv gained a size row for
+NV_CONFIDENTIAL_COMPUTE (0xcb33), the guest module was rebuilt against the kata
+guest kernel (6.18.35-nvkvm) and injected into the DEPLOYED image
+(`/opt/nvkvm-kata/share/kata-nvkvm.image` -- note the runtime does not load the
+build artifact under /var/lib/nvkvm-kata/build/, and patching that one changes
+nothing). Result:
+
+```
+alloc-param warnings in the guest log:  0     (was 1: hClass=0xcb33)
+cuInit rc = 0
+cuDeviceGetCount rc = 0  devices = 0        <-- UNCHANGED
+```
+
+So the missing size was real and is now closed, and it is **not** what stops CUDA
+enumerating. This is exactly what the NV2081 row in nvkvm-pv's abi/nvgpu.h
+predicts: closing one of these removes its warning without necessarily curing the
+failure that led you to it. One more variable eliminated with certainty.
+
 ## Where to look next
 
 The split is NVML-yes / CUDA-no with a correct userspace. That points at what
