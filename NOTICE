@@ -1,0 +1,28 @@
+nvkvm-kata
+Copyright 2026 Reindert Pelsma
+
+Everything authored in this repository -- the installer and uninstaller,
+scripts/ and scripts/lib/, the QEMU shim, the CUDA proof program, examples/
+(including docker-compose.yml), and the design documents under docs/ -- is
+licensed under the Apache License, Version 2.0. See LICENSE.
+
+Third-party material keeps its own licence:
+
+  docs/design/evidence/07/kata-configuration.toml is a captured Kata
+  Containers configuration file. Kata Containers is Apache-2.0, copyright
+  the Kata Containers authors; the file carries its own SPDX header.
+
+  Files under docs/design/evidence/ and traces/ are captured program output
+  (logs, configuration dumps) recorded during testing. They are reproduced
+  as evidence, not authored here.
+
+An independent, non-commercial hobby project, run by one person. Nothing
+here is affiliated with, authorised by, sponsored by or endorsed by NVIDIA
+Corporation, the Kata Containers project, the OpenInfra Foundation or the
+CNCF. "NVIDIA" and "CUDA" are trademarks of NVIDIA Corporation; "Kata
+Containers" is a trademark of the OpenInfra Foundation. They appear here
+only to name the things this software interoperates with.
+
+No NVIDIA software is redistributed by this repository. It installs and
+configures packages that you obtain yourself, on hardware you own, and it
+is experimental: run it at your own risk.

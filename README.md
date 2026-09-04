@@ -202,7 +202,13 @@ one-line build change; the libraries arrive through NVIDIA's own
 
 ## Licence
 
-The design documents are the bulk of this repository; `scripts/` carries the
-installer, the uninstaller, the QEMU shim and the CUDA proof program. See
-[nvkvm-pv](https://github.com/reindertpelsma/nvkvm-pv) for the licence covering
-the components packaged here.
+**Apache License 2.0** — see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+
+That covers everything authored here: the installer and uninstaller, `scripts/`
+and `scripts/lib/`, the QEMU shim, the CUDA proof program, `examples/` including
+the compose file, and the design documents that are the bulk of this repository.
+
+Components *packaged* by the installer are not covered by it and keep their own
+licences — [nvkvm-pv](https://github.com/reindertpelsma/nvkvm-pv) (Apache-2.0),
+Kata Containers (Apache-2.0), and NVIDIA's driver and container toolkit, none of
+which this repository redistributes.
