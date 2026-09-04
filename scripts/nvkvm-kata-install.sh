@@ -616,8 +616,18 @@ resolve_sources() {
         done
     fi
     if want qemu || want kernel; then
-        [ -n "$NVKVM_SRC" ] || die "no nvkvm-pv checkout found" \
-            "pass --nvkvm-src DIR, or: git clone https://github.com/reindertpelsma/nvkvm-pv $STATE/src/nvkvm-pv"
+        # Clone it, the same way kata-containers is cloned below.  --help and
+        # docs/install.md both promise "default: clone into state dir"; before
+        # this, resolve_sources only *searched* and then died, so the README's
+        # one-command Quickstart could never work on a genuinely fresh host.
+        if [ -z "$NVKVM_SRC" ]; then
+            change "cloning nvkvm-pv source into $STATE/src/nvkvm-pv"
+            mkdir -p "$STATE/src"
+            git clone --depth 1 https://github.com/reindertpelsma/nvkvm-pv "$STATE/src/nvkvm-pv" \
+                >/dev/null 2>&1 || die "clone of nvkvm-pv failed" \
+                    "clone it by hand and pass --nvkvm-src DIR"
+            NVKVM_SRC="$STATE/src/nvkvm-pv"
+        fi
         [ -f "$NVKVM_SRC/src/guest/Makefile" ] || die "$NVKVM_SRC is not an nvkvm-pv checkout" "expected src/guest/Makefile in it"
         ok "nvkvm-pv: $NVKVM_SRC"
     fi
